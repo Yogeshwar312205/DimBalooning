@@ -1,0 +1,123 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         String   @default("INSPECTOR") // ADMIN, INSPECTOR, ENGINEER, VIEWER
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  uploadedDrawings   Drawing[]
+  createdInspections InspectionSession[]
+  balloonsCreated    Balloon[]
+  measurementsEdited Measurement[]
+  collaborations     InspectionCollaborator[]
+  reportsGenerated   Report[]
+}
+
+model Drawing {
+  id           String   @id @default(uuid())
+  name         String
+  filePath     String
+  revision     String   @default("Rev A")
+  pageCount    Int      @default(1)
+  uploadedById String
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  inspectionSessions InspectionSession[]
+}
+
+model InspectionSession {
+  id          String   @id @default(uuid())
+  drawingId   String
+  drawing     Drawing  @relation(fields: [drawingId], references: [id], onDelete: Cascade)
+  name        String
+  partNumber  String
+  partName    String
+  revision    String   @default("Rev A")
+  batchNumber String
+  status      String   @default("DRAFT") // DRAFT, IN_PROGRESS, COMPLETED, APPROVED
+  createdById String
+  createdBy   User     @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  balloons      Balloon[]
+  collaborators InspectionCollaborator[]
+  reports       Report[]
+}
+
+model Balloon {
+  id                  String            @id @default(uuid())
+  inspectionSessionId String
+  inspectionSession   InspectionSession @relation(fields: [inspectionSessionId], references: [id], onDelete: Cascade)
+  balloonNumber       Int
+  pageNumber          Int               @default(1)
+  x                   Float             // Normalized position [0..1]
+  y                   Float             // Normalized position [0..1]
+  width               Float             @default(0.04)
+  height              Float             @default(0.04)
+  leaderStartX        Float?
+  leaderStartY        Float?
+  leaderEndX          Float?
+  leaderEndY          Float?
+  createdById         String
+  createdBy           User              @relation(fields: [createdById], references: [id])
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  measurement Measurement?
+}
+
+model Measurement {
+  id             String   @id @default(uuid())
+  balloonId      String   @unique
+  balloon        Balloon  @relation(fields: [balloonId], references: [id], onDelete: Cascade)
+  dimensionText  String?  // e.g., "25 ± 0.10"
+  nominalValue   Float?
+  upperTolerance Float?
+  lowerTolerance Float?
+  lowerLimit     Float?
+  upperLimit     Float?
+  actualValue    Float?
+  unit           String   @default("mm")
+  status         String   @default("PENDING") // PASS, CHECK, FAIL, PENDING
+  remarks        String?
+  updatedById    String?
+  updatedBy      User?    @relation(fields: [updatedById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model InspectionCollaborator {
+  id                  String            @id @default(uuid())
+  inspectionSessionId String
+  inspectionSession   InspectionSession @relation(fields: [inspectionSessionId], references: [id], onDelete: Cascade)
+  userId              String
+  user                User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt            DateTime          @default(now())
+
+  @@unique([inspectionSessionId, userId])
+}
+
+model Report {
+  id                  String            @id @default(uuid())
+  inspectionSessionId String
+  inspectionSession   InspectionSession @relation(fields: [inspectionSessionId], references: [id], onDelete: Cascade)
+  type                String            // EXCEL, MARKED_PDF
+  filePath            String
+  generatedById       String
+  generatedBy         User              @relation(fields: [generatedById], references: [id])
+  createdAt           DateTime          @default(now())
+}

@@ -1,0 +1,33 @@
+# Node modules
+node_modules/
+dist/
+build/
+.next/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+
+# Database & Uploads
+*.db
+*.sqlite
+*.sqlite3
+dev.db-journal
+uploads/*
+!uploads/.gitkeep
+reports/*
+!reports/.gitkeep
+
+# Environment & Secrets
+.env
+.env.local
+.env.production
+
+# IDE & OS
+.DS_Store
+.vscode/
+.idea/

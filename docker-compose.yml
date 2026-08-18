@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # 1. FastAPI Python PDF Vector Processing Microservice
+  pdf-service:
+    build:
+      context: ./pdf-service
+      dockerfile: Dockerfile
+    container_name: dim_pdf_service
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+    restart: always
+
+  # 2. Express Node.js & Prisma Backend API Engine
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dim_backend_api
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - DATABASE_URL=file:./dev.db
+      - JWT_SECRET=super_secret_jwt_key_manufacturing_2026
+      - PDF_SERVICE_URL=http://pdf-service:8000
+    depends_on:
+      - pdf-service
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/reports:/app/reports
+    restart: always
+
+  # 3. React + Vite Frontend Web App
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: dim_frontend_web
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: always
