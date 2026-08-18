@@ -6,6 +6,7 @@ import { Navbar } from './components/Layout/Navbar';
 import { Sidebar } from './components/Layout/Sidebar';
 
 // Pages
+import { PrototypeWorkspace } from './pages/PrototypeWorkspace';
 import { Login } from './pages/Login';
 import { Register } from './pages/Register';
 import { Dashboard } from './pages/Dashboard';
@@ -48,11 +49,15 @@ export const App: React.FC = () => {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Valmet Demo Prototype Workspace - Direct Zero-Auth Access */}
+        <Route path="/" element={<PrototypeWorkspace />} />
+        <Route path="/prototype" element={<PrototypeWorkspace />} />
+
         {/* Public Auth Routes */}
         <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <Login />} />
         <Route path="/register" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <Register />} />
 
-        {/* Protected Dashboard & App Routes */}
+        {/* Protected Dashboard & Full Platform Routes */}
         <Route path="/dashboard" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />
         <Route path="/drawings" element={<ProtectedLayout><Drawings /></ProtectedLayout>} />
         <Route path="/inspections" element={<ProtectedLayout><Inspections /></ProtectedLayout>} />
@@ -61,8 +66,8 @@ export const App: React.FC = () => {
         <Route path="/users" element={<ProtectedLayout><Users /></ProtectedLayout>} />
         <Route path="/settings" element={<ProtectedLayout><Settings /></ProtectedLayout>} />
 
-        {/* Root Redirect */}
-        <Route path="*" element={<Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />} />
+        {/* Fallback to Prototype */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
   );
