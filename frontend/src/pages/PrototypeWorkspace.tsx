@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { fabric } from 'fabric';
 import * as pdfjsLib from 'pdfjs-dist';
 import {
@@ -10,33 +10,43 @@ import {
   ZoomOut,
   RotateCcw,
   MousePointer,
-  FileText,
-  Sliders,
+  Maximize2,
   Edit2,
   Check,
-  X
+  X,
+  ChevronRight,
+  ChevronLeft,
+  Layers,
+  Sliders,
+  PanelRightClose,
+  PanelRightOpen
 } from 'lucide-react';
-import { calculateTolerance, evaluateMultiReadings, ToleranceResult } from '../utils/toleranceEngine';
+import { calculateTolerance, ToleranceResult } from '../utils/toleranceEngine';
 import { exportInspectionToExcel, ExportBalloonData } from '../utils/clientExcelExport';
 import { VALMET_SAMPLE_DRAWING_SVG } from '../assets/sampleDrawings';
 
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
-export interface PrototypeBalloon {
+export interface DimensionSubItem {
   id: string;
-  balloonNumber: number; // strictly sequential (locked)
-  dimensionName: string;
-  unit: string;
-  nominalValue: number | null; // Drawing Dim from diagram
-  upperTolerance: number | null;
-  lowerTolerance: number | null;
-  warningThresholdPercent: number; // Acceptance level %
-  observationCount: number; // Number of dimension readings (1, 2, 3...)
-  observations: (number | null)[]; // Actual physical readings
+  name: string; // e.g. "Length", "Breadth", "Hole Diameter", "Depth"
+  nominalValue: number | null; // Drawing Dimension from diagram
+  upperTolerance: number | null; // e.g. +0.05
+  lowerTolerance: number | null; // e.g. -0.05
+  actualValue: number | null; // Measured physical reading
   lowerLimit: number | null;
   upperLimit: number | null;
   status: 'OK' | 'TO CHECK' | 'NOT ACCEPTABLE' | 'PENDING';
+}
+
+export interface PrototypeBalloon {
+  id: string;
+  balloonNumber: number; // sequential: 1, 2, 3 -> formatted as "01", "02", "03"
+  unit: string;
+  items: DimensionSubItem[]; // Each dimension has its own nominal & reading
+  overallStatus: 'OK' | 'TO CHECK' | 'NOT ACCEPTABLE' | 'PENDING';
+  warningThresholdPercent: number;
   remarks?: string;
   // Normalized canvas coordinates [0..1]
   x: number;
@@ -77,6 +87,8 @@ const STATUS_STYLES: Record<string, { fill: string; border: string; text: string
   }
 };
 
+const formatBalloonNumber = (num: number): string => String(num).padStart(2, '0');
+
 export const PrototypeWorkspace: React.FC = () => {
   // Drawing Canvas State
   const [drawingType, setDrawingType] = useState<'SAMPLE_SVG' | 'IMAGE' | 'PDF'>('SAMPLE_SVG');
@@ -85,7 +97,7 @@ export const PrototypeWorkspace: React.FC = () => {
   const [partNumber, setPartNumber] = useState<string>('VAL-8492-MK2');
   const [revision, setRevision] = useState<string>('Rev 05');
 
-  // Canvas References & Scaling
+  // Viewport & Scaling
   const bgCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
@@ -93,6 +105,7 @@ export const PrototypeWorkspace: React.FC = () => {
   const [canvasDim, setCanvasDim] = useState<{ width: number; height: number }>({ width: 1000, height: 700 });
   const [zoomScale, setZoomScale] = useState<number>(1.0);
   const [activeTool, setActiveTool] = useState<'BALLOON' | 'SELECT'>('BALLOON');
+  const [inspectionTabOpen, setInspectionTabOpen] = useState<boolean>(true);
 
   // Inspection Balloons
   const [balloons, setBalloons] = useState<PrototypeBalloon[]>([]);
@@ -103,14 +116,15 @@ export const PrototypeWorkspace: React.FC = () => {
   const [modalData, setModalData] = useState<{
     id: string;
     balloonNumber: number;
-    dimensionName: string;
     unit: string;
-    nominalValue: string;
-    upperTolerance: string;
-    lowerTolerance: string;
     warningThresholdPercent: number;
-    observationCount: number;
-    observations: string[];
+    subDimensions: Array<{
+      name: string;
+      nominalValue: string;
+      upperTolerance: string;
+      lowerTolerance: string;
+      actualValue: string;
+    }>;
     remarks: string;
     isNew: boolean;
     normX: number;
@@ -120,14 +134,11 @@ export const PrototypeWorkspace: React.FC = () => {
   }>({
     id: '',
     balloonNumber: 1,
-    dimensionName: '',
     unit: 'mm',
-    nominalValue: '25.00',
-    upperTolerance: '0.10',
-    lowerTolerance: '-0.10',
     warningThresholdPercent: 10,
-    observationCount: 1,
-    observations: [''],
+    subDimensions: [
+      { name: 'Dimension 01', nominalValue: '25.00', upperTolerance: '0.10', lowerTolerance: '-0.10', actualValue: '' }
+    ],
     remarks: '',
     isNew: false,
     normX: 0.5,
@@ -214,15 +225,48 @@ export const PrototypeWorkspace: React.FC = () => {
     };
   }, [drawingSrc, drawingType]);
 
-  // Setup Fabric.js Vector Overlay
+  // Setup Fabric.js Vector Overlay with Drag & Move Support
   useEffect(() => {
     if (!overlayCanvasRef.current) return;
 
     const fc = new fabric.Canvas(overlayCanvasRef.current, {
       width: canvasDim.width,
       height: canvasDim.height,
-      selection: activeTool === 'SELECT',
-      hoverCursor: activeTool === 'BALLOON' ? 'crosshair' : 'pointer'
+      selection: true,
+      hoverCursor: 'pointer',
+      preserveObjectStacking: true
+    });
+
+    // Real-time leader line stretching during balloon dragging
+    fc.on('object:moving', (e) => {
+      const target = e.target as any;
+      if (target && target.data?.balloonId) {
+        const balloonId = target.data.balloonId;
+        const currentPx = target.left;
+        const currentPy = target.top;
+
+        // Find connected leader line
+        const lines = fc.getObjects('line') as fabric.Line[];
+        const connectedLine = lines.find((l: any) => l.data?.balloonId === balloonId);
+        if (connectedLine) {
+          connectedLine.set({ x2: currentPx, y2: currentPy });
+          fc.renderAll();
+        }
+      }
+    });
+
+    // Save final dropped position
+    fc.on('object:modified', (e) => {
+      const target = e.target as any;
+      if (target && target.data?.balloonId) {
+        const balloonId = target.data.balloonId;
+        const newNormX = Math.max(0.01, Math.min(0.99, target.left / canvasDim.width));
+        const newNormY = Math.max(0.01, Math.min(0.99, target.top / canvasDim.height));
+
+        setBalloons((prev) =>
+          prev.map((b) => (b.id === balloonId ? { ...b, x: newNormX, y: newNormY } : b))
+        );
+      }
     });
 
     fabricCanvasRef.current = fc;
@@ -233,18 +277,9 @@ export const PrototypeWorkspace: React.FC = () => {
     };
   }, [canvasDim]);
 
-  useEffect(() => {
-    const fc = fabricCanvasRef.current;
-    if (!fc) return;
-
-    fc.defaultCursor = activeTool === 'BALLOON' ? 'crosshair' : 'default';
-    fc.hoverCursor = activeTool === 'BALLOON' ? 'crosshair' : 'pointer';
-    fc.selection = activeTool === 'SELECT';
-  }, [activeTool]);
-
-  // Collision Avoidance: Find Nearest Free Position
+  // Nearest Free Position Collision Avoidance
   const findCollisionFreePosition = (targetX: number, targetY: number, existing: PrototypeBalloon[]) => {
-    const radius = 20;
+    const radius = 22;
     let finalX = targetX;
     let finalY = targetY;
     let attempts = 0;
@@ -277,12 +312,18 @@ export const PrototypeWorkspace: React.FC = () => {
     return { x: targetX, y: targetY };
   };
 
-  // Handle Canvas Click to add Balloon -> opens Configure Dimension Dialog Box
+  // Canvas Mouse Down: Adds a new balloon when in BALLOON mode (if clicking on empty space)
   useEffect(() => {
     const fc = fabricCanvasRef.current;
     if (!fc) return;
 
     const handleMouseDown = (opt: fabric.IEvent) => {
+      // If user clicked an existing balloon group, let Fabric handle drag selection
+      if (opt.target && (opt.target as any).data?.balloonId) {
+        setSelectedBalloonId((opt.target as any).data.balloonId);
+        return;
+      }
+
       if (activeTool !== 'BALLOON') return;
 
       const pointer = fc.getPointer(opt.e);
@@ -291,20 +332,23 @@ export const PrototypeWorkspace: React.FC = () => {
 
       const freePos = findCollisionFreePosition(clickedX, clickedY, balloons);
 
-      // Auto sequential balloon ID calculation (Strictly sequential, no manual change)
+      // Auto sequential balloon ID calculation (Strictly sequential, e.g. 1 -> "01")
       const nextNum = balloons.length > 0 ? Math.max(...balloons.map((b) => b.balloonNumber)) + 1 : 1;
 
       setModalData({
         id: `dim-b-${nextNum}-${Date.now()}`,
         balloonNumber: nextNum,
-        dimensionName: `Dimension #${nextNum}`,
         unit: 'mm',
-        nominalValue: '25.00',
-        upperTolerance: '0.10',
-        lowerTolerance: '-0.10',
         warningThresholdPercent: 10,
-        observationCount: 1,
-        observations: [''],
+        subDimensions: [
+          {
+            name: `Dimension ${formatBalloonNumber(nextNum)}`,
+            nominalValue: '25.00',
+            upperTolerance: '0.10',
+            lowerTolerance: '-0.10',
+            actualValue: ''
+          }
+        ],
         remarks: '',
         isNew: true,
         normX: freePos.x / canvasDim.width,
@@ -327,14 +371,15 @@ export const PrototypeWorkspace: React.FC = () => {
     setModalData({
       id: b.id,
       balloonNumber: b.balloonNumber,
-      dimensionName: b.dimensionName,
       unit: b.unit || 'mm',
-      nominalValue: b.nominalValue !== null ? String(b.nominalValue) : '',
-      upperTolerance: b.upperTolerance !== null ? String(b.upperTolerance) : '0.00',
-      lowerTolerance: b.lowerTolerance !== null ? String(b.lowerTolerance) : '0.00',
       warningThresholdPercent: b.warningThresholdPercent || 10,
-      observationCount: b.observationCount || 1,
-      observations: b.observations.map((o) => (o !== null && o !== undefined ? String(o) : '')),
+      subDimensions: b.items.map((item) => ({
+        name: item.name,
+        nominalValue: item.nominalValue !== null ? String(item.nominalValue) : '',
+        upperTolerance: item.upperTolerance !== null ? String(item.upperTolerance) : '0.00',
+        lowerTolerance: item.lowerTolerance !== null ? String(item.lowerTolerance) : '0.00',
+        actualValue: item.actualValue !== null && item.actualValue !== undefined ? String(item.actualValue) : ''
+      })),
       remarks: b.remarks || '',
       isNew: false,
       normX: b.x,
@@ -345,51 +390,52 @@ export const PrototypeWorkspace: React.FC = () => {
     setConfigModalOpen(true);
   };
 
+  // Evaluate Overall Balloon Status from its Sub-Dimensions
+  const computeOverallStatus = (items: DimensionSubItem[]): 'OK' | 'TO CHECK' | 'NOT ACCEPTABLE' | 'PENDING' => {
+    if (items.some((i) => i.status === 'NOT ACCEPTABLE')) return 'NOT ACCEPTABLE';
+    if (items.some((i) => i.status === 'TO CHECK')) return 'TO CHECK';
+    if (items.every((i) => i.status === 'OK')) return 'OK';
+    return 'PENDING';
+  };
+
   // Save Configured Dimension from Dialog Box
   const handleSaveModalDimension = () => {
-    const nom = parseFloat(modalData.nominalValue);
-    const upperTol = parseFloat(modalData.upperTolerance);
-    const lowerTol = parseFloat(modalData.lowerTolerance);
+    const computedItems: DimensionSubItem[] = modalData.subDimensions.map((sub, idx) => {
+      const nom = parseFloat(sub.nominalValue);
+      const upperTol = parseFloat(sub.upperTolerance);
+      const lowerTol = parseFloat(sub.lowerTolerance);
+      const actual = sub.actualValue !== '' ? parseFloat(sub.actualValue) : null;
 
-    if (isNaN(nom)) {
-      alert('Please enter a valid numeric Drawing Dimension (Nominal).');
-      return;
-    }
+      const tolResult: ToleranceResult = calculateTolerance(
+        isNaN(nom) ? null : nom,
+        isNaN(upperTol) ? 0 : upperTol,
+        isNaN(lowerTol) ? 0 : lowerTol,
+        isNaN(actual as number) ? null : actual,
+        modalData.warningThresholdPercent
+      );
 
-    const obsCount = Math.max(1, modalData.observationCount);
-    const parsedObservations: (number | null)[] = [];
-    for (let i = 0; i < obsCount; i++) {
-      const raw = modalData.observations[i];
-      if (raw !== undefined && raw !== '' && !isNaN(parseFloat(raw))) {
-        parsedObservations.push(parseFloat(raw));
-      } else {
-        parsedObservations.push(null);
-      }
-    }
+      return {
+        id: `sub-${idx}-${Date.now()}`,
+        name: sub.name || `Dim ${idx + 1}`,
+        nominalValue: isNaN(nom) ? null : nom,
+        upperTolerance: isNaN(upperTol) ? 0 : upperTol,
+        lowerTolerance: isNaN(lowerTol) ? 0 : lowerTol,
+        actualValue: isNaN(actual as number) ? null : actual,
+        lowerLimit: tolResult.lowerLimit,
+        upperLimit: tolResult.upperLimit,
+        status: tolResult.status
+      };
+    });
 
-    // Evaluate Tolerance Math
-    const tolResult: ToleranceResult = evaluateMultiReadings(
-      nom,
-      isNaN(upperTol) ? 0 : upperTol,
-      isNaN(lowerTol) ? 0 : lowerTol,
-      parsedObservations,
-      modalData.warningThresholdPercent
-    );
+    const overall = computeOverallStatus(computedItems);
 
     const balloonItem: PrototypeBalloon = {
       id: modalData.id,
-      balloonNumber: modalData.balloonNumber, // sequential locked ID
-      dimensionName: modalData.dimensionName || `Dimension #${modalData.balloonNumber}`,
+      balloonNumber: modalData.balloonNumber, // strictly sequential 2-digit format (01, 02, 03)
       unit: modalData.unit,
-      nominalValue: nom,
-      upperTolerance: isNaN(upperTol) ? 0 : upperTol,
-      lowerTolerance: isNaN(lowerTol) ? 0 : lowerTol,
+      items: computedItems,
+      overallStatus: overall,
       warningThresholdPercent: modalData.warningThresholdPercent,
-      observationCount: obsCount,
-      observations: parsedObservations,
-      lowerLimit: tolResult.lowerLimit,
-      upperLimit: tolResult.upperLimit,
-      status: tolResult.status,
       remarks: modalData.remarks,
       x: modalData.normX,
       y: modalData.normY,
@@ -407,7 +453,7 @@ export const PrototypeWorkspace: React.FC = () => {
     setConfigModalOpen(false);
   };
 
-  // Render Balloons onto Fabric.js Canvas
+  // Render Balloons & Leader Lines onto Fabric.js Canvas
   useEffect(() => {
     const fc = fabricCanvasRef.current;
     if (!fc) return;
@@ -418,7 +464,7 @@ export const PrototypeWorkspace: React.FC = () => {
       const px = b.x * canvasDim.width;
       const py = b.y * canvasDim.height;
       const isSelected = b.id === selectedBalloonId;
-      const statusStyle = STATUS_STYLES[b.status] || STATUS_STYLES.PENDING;
+      const statusStyle = STATUS_STYLES[b.overallStatus] || STATUS_STYLES.PENDING;
 
       let leaderLine: fabric.Line | null = null;
       let targetDot: fabric.Circle | null = null;
@@ -448,8 +494,9 @@ export const PrototypeWorkspace: React.FC = () => {
           strokeWidth: 1.5,
           strokeDashArray: [3, 3],
           selectable: false,
-          evented: false
-        });
+          evented: false,
+          data: { balloonId: b.id }
+        } as any);
 
         fc.add(targetDot);
         fc.add(leaderLine);
@@ -465,9 +512,10 @@ export const PrototypeWorkspace: React.FC = () => {
         originY: 'center'
       });
 
-      // Balloon Number Text
-      const text = new fabric.Text(String(b.balloonNumber), {
-        fontSize: String(b.balloonNumber).length > 2 ? 10 : 12,
+      // Balloon Number Text formatted strictly as 2-digit number (01, 02, 03)
+      const formattedNum = formatBalloonNumber(b.balloonNumber);
+      const text = new fabric.Text(formattedNum, {
+        fontSize: 11,
         fontWeight: 'bold',
         fill: statusStyle.text,
         fontFamily: 'Arial, sans-serif',
@@ -481,8 +529,15 @@ export const PrototypeWorkspace: React.FC = () => {
         originX: 'center',
         originY: 'center',
         hasControls: false,
-        hasBorders: false,
-        selectable: activeTool === 'SELECT',
+        hasBorders: true,
+        borderColor: '#1A73E8',
+        borderScaleFactor: 1.5,
+        lockRotation: true,
+        lockScalingX: true,
+        lockScalingY: true,
+        selectable: true,
+        evented: true,
+        hoverCursor: 'move',
         data: { balloonId: b.id }
       });
 
@@ -494,55 +549,44 @@ export const PrototypeWorkspace: React.FC = () => {
         openEditModalForBalloon(b);
       });
 
-      balloonGroup.on('moving', () => {
-        if (leaderLine) {
-          const currentPx = balloonGroup.left || px;
-          const currentPy = balloonGroup.top || py;
-          leaderLine.set({ x2: currentPx, y2: currentPy });
-          fc.renderAll();
-        }
-      });
-
-      balloonGroup.on('modified', () => {
-        const newPx = balloonGroup.left || px;
-        const newPy = balloonGroup.top || py;
-
-        const newNormX = Math.max(0.01, Math.min(0.99, newPx / canvasDim.width));
-        const newNormY = Math.max(0.01, Math.min(0.99, newPy / canvasDim.height));
-
-        setBalloons((prev) =>
-          prev.map((item) => (item.id === b.id ? { ...item, x: newNormX, y: newNormY } : item))
-        );
-      });
-
       fc.add(balloonGroup);
     });
 
     fc.renderAll();
-  }, [balloons, selectedBalloonId, activeTool, canvasDim]);
+  }, [balloons, selectedBalloonId, canvasDim]);
 
-  // Inline Quick Reading update from the table
-  const handleQuickObservationChange = (balloonId: string, obsIndex: number, rawVal: string) => {
+  // Inline Reading update from the table
+  const handleQuickReadingChange = (balloonId: string, itemIdx: number, rawVal: string) => {
     setBalloons((prev) =>
       prev.map((b) => {
         if (b.id !== balloonId) return b;
-        const updatedObs = [...b.observations];
-        updatedObs[obsIndex] = rawVal === '' ? null : parseFloat(rawVal);
+        const actual = rawVal === '' ? null : parseFloat(rawVal);
 
-        const tolResult = evaluateMultiReadings(
-          b.nominalValue,
-          b.upperTolerance,
-          b.lowerTolerance,
-          updatedObs,
-          b.warningThresholdPercent
-        );
+        const updatedItems = b.items.map((item, idx) => {
+          if (idx !== itemIdx) return item;
+          const tolResult = calculateTolerance(
+            item.nominalValue,
+            item.upperTolerance,
+            item.lowerTolerance,
+            isNaN(actual as number) ? null : actual,
+            b.warningThresholdPercent
+          );
+
+          return {
+            ...item,
+            actualValue: isNaN(actual as number) ? null : actual,
+            status: tolResult.status,
+            lowerLimit: tolResult.lowerLimit,
+            upperLimit: tolResult.upperLimit
+          };
+        });
+
+        const overall = computeOverallStatus(updatedItems);
 
         return {
           ...b,
-          observations: updatedObs,
-          status: tolResult.status,
-          lowerLimit: tolResult.lowerLimit,
-          upperLimit: tolResult.upperLimit
+          items: updatedItems,
+          overallStatus: overall
         };
       })
     );
@@ -561,17 +605,18 @@ export const PrototypeWorkspace: React.FC = () => {
 
     const exportItems: ExportBalloonData[] = balloons.map((b) => ({
       balloonNumber: b.balloonNumber,
-      dimensionName: b.dimensionName,
-      nominalValue: b.nominalValue,
-      upperTolerance: b.upperTolerance,
-      lowerTolerance: b.lowerTolerance,
-      lowerLimit: b.lowerLimit,
-      upperLimit: b.upperLimit,
-      observationCount: b.observationCount,
-      observations: b.observations,
-      actualValue: b.observations[0] ?? null,
       unit: b.unit,
-      status: b.status,
+      items: b.items.map((i) => ({
+        name: i.name,
+        nominalValue: i.nominalValue,
+        upperTolerance: i.upperTolerance,
+        lowerTolerance: i.lowerTolerance,
+        lowerLimit: i.lowerLimit,
+        upperLimit: i.upperLimit,
+        actualValue: i.actualValue,
+        status: i.status
+      })),
+      overallStatus: b.overallStatus,
       remarks: b.remarks
     }));
 
@@ -590,30 +635,30 @@ export const PrototypeWorkspace: React.FC = () => {
   };
 
   // Summary Metrics Counts
-  const okCount = balloons.filter((b) => b.status === 'OK').length;
-  const checkCount = balloons.filter((b) => b.status === 'TO CHECK').length;
-  const failCount = balloons.filter((b) => b.status === 'NOT ACCEPTABLE').length;
+  const okCount = balloons.filter((b) => b.overallStatus === 'OK').length;
+  const checkCount = balloons.filter((b) => b.overallStatus === 'TO CHECK').length;
+  const failCount = balloons.filter((b) => b.overallStatus === 'NOT ACCEPTABLE').length;
 
   return (
     <div className="flex flex-col h-screen w-screen bg-slate-50 text-slate-900 overflow-hidden font-sans text-xs select-none">
       {/* 1. Header: Clean Technical Title & Actions */}
-      <header className="h-14 px-5 bg-white border-b border-slate-200 flex items-center justify-between shrink-0 shadow-sm z-20">
+      <header className="h-12 px-4 bg-white border-b border-slate-200 flex items-center justify-between shrink-0 shadow-sm z-20">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded bg-slate-800 flex items-center justify-center text-white font-bold text-sm">
+          <div className="w-7 h-7 rounded bg-slate-800 flex items-center justify-center text-white font-bold text-xs">
             V
           </div>
           <div>
-            <h1 className="font-bold text-sm text-slate-900 tracking-tight">
+            <h1 className="font-bold text-xs text-slate-900 tracking-tight">
               Drawing Dimension Ballooning & Inspection Tool
             </h1>
-            <p className="text-[11px] text-slate-500 font-mono">
+            <p className="text-[10px] text-slate-500 font-mono">
               Drawing: <span className="font-semibold text-slate-700">{drawingName}</span> | Part: <span className="font-semibold text-slate-700">{partNumber}</span> ({revision})
             </p>
           </div>
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2">
           <input
             type="file"
             ref={fileInputRef}
@@ -624,7 +669,7 @@ export const PrototypeWorkspace: React.FC = () => {
 
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 transition-colors shadow-sm"
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 transition-colors shadow-sm"
           >
             <Upload className="w-3.5 h-3.5 text-slate-600" />
             <span>Upload Drawing (PDF / Image)</span>
@@ -632,21 +677,33 @@ export const PrototypeWorkspace: React.FC = () => {
 
           <button
             onClick={handleExport}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded bg-emerald-700 hover:bg-emerald-800 text-white transition-colors shadow-sm"
+            className="flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded bg-emerald-700 hover:bg-emerald-800 text-white transition-colors shadow-sm"
           >
             <FileSpreadsheet className="w-3.5 h-3.5" />
             <span>Export Excel (.xlsx)</span>
           </button>
+
+          {/* Toggle Inspection Table Panel */}
+          <button
+            onClick={() => setInspectionTabOpen((prev) => !prev)}
+            className={`p-1.5 rounded border transition-colors ${
+              inspectionTabOpen
+                ? 'bg-slate-100 text-slate-800 border-slate-300'
+                : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+            }`}
+            title={inspectionTabOpen ? 'Collapse Inspection Table' : 'Expand Inspection Table'}
+          >
+            {inspectionTabOpen ? <PanelRightClose className="w-4 h-4" /> : <PanelRightOpen className="w-4 h-4" />}
+          </button>
         </div>
       </header>
 
-      {/* 2. Main Work Area: 2D Engineering Canvas on Left, Inspection Table on Right */}
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
-        {/* Left Side: 2D Engineering Canvas */}
-        <div className="flex-1 flex flex-col bg-slate-100 overflow-hidden relative border-r border-slate-300">
-          {/* Canvas Floating Toolbar */}
+      {/* 2. Main Work Area: Dominant 2D Canvas on Left, Compact Inspection Table on Right */}
+      <div className="flex-1 flex flex-row overflow-hidden relative">
+        {/* Left Side: DOMINANT 2D Engineering Canvas */}
+        <div className="flex-1 flex flex-col bg-slate-100 overflow-hidden relative">
+          {/* Top Canvas Tool Selector */}
           <div className="absolute top-3 left-3 z-10 flex items-center gap-1 bg-white/95 backdrop-blur-sm p-1 rounded border border-slate-300 shadow-sm">
-            {/* Mode Selectors */}
             <button
               onClick={() => setActiveTool('BALLOON')}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
@@ -667,45 +724,65 @@ export const PrototypeWorkspace: React.FC = () => {
                   ? 'bg-slate-900 text-white'
                   : 'text-slate-700 hover:bg-slate-100'
               }`}
-              title="Select and reposition balloons with leader line"
+              title="Select and drag balloons to reposition leader line"
             >
               <MousePointer className="w-3.5 h-3.5" />
               <span>Select & Drag</span>
             </button>
+          </div>
 
-            <div className="h-4 w-px bg-slate-200 mx-1" />
-
-            {/* Zoom Controls */}
+          {/* Vertical Zoom & Pan Bar on Canvas Left Edge */}
+          <div className="absolute left-3 top-16 z-10 flex flex-col items-center bg-white/95 backdrop-blur-sm p-1.5 rounded-lg border border-slate-300 shadow-sm space-y-1.5">
             <button
               onClick={() => setZoomScale((s) => Math.min(2.5, s + 0.15))}
-              className="p-1 text-slate-700 hover:bg-slate-100 rounded"
-              title="Zoom In"
+              className="p-1.5 text-slate-700 hover:bg-slate-100 rounded"
+              title="Zoom In (+)"
             >
-              <ZoomIn className="w-3.5 h-3.5" />
+              <ZoomIn className="w-4 h-4" />
             </button>
+
+            {/* Vertical Zoom Presets */}
+            <div className="flex flex-col items-center gap-1 my-1">
+              <button
+                onClick={() => setZoomScale(1.5)}
+                className={`text-[9px] font-mono px-1 py-0.5 rounded ${zoomScale === 1.5 ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+              >
+                150%
+              </button>
+              <button
+                onClick={() => setZoomScale(1.0)}
+                className={`text-[9px] font-mono px-1 py-0.5 rounded ${zoomScale === 1.0 ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+              >
+                100%
+              </button>
+              <button
+                onClick={() => setZoomScale(0.75)}
+                className={`text-[9px] font-mono px-1 py-0.5 rounded ${zoomScale === 0.75 ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+              >
+                75%
+              </button>
+            </div>
 
             <button
               onClick={() => setZoomScale((s) => Math.max(0.4, s - 0.15))}
-              className="p-1 text-slate-700 hover:bg-slate-100 rounded"
-              title="Zoom Out"
+              className="p-1.5 text-slate-700 hover:bg-slate-100 rounded"
+              title="Zoom Out (-)"
             >
-              <ZoomOut className="w-3.5 h-3.5" />
+              <ZoomOut className="w-4 h-4" />
             </button>
+
+            <div className="w-4 h-px bg-slate-200" />
 
             <button
               onClick={() => setZoomScale(1.0)}
-              className="p-1 text-slate-700 hover:bg-slate-100 rounded"
-              title="Reset Zoom (100%)"
+              className="p-1.5 text-slate-700 hover:bg-slate-100 rounded"
+              title="Reset 100%"
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
-
-            <span className="text-[10px] font-mono text-slate-500 px-1.5">
-              {Math.round(zoomScale * 100)}%
-            </span>
           </div>
 
-          {/* 2D Blueprint Canvas Viewport */}
+          {/* 2D Canvas Viewport Scroll Area */}
           <div className="flex-1 overflow-auto p-6 flex items-center justify-center relative">
             <div
               className="relative inline-block bg-white shadow border border-slate-300 transition-transform origin-center"
@@ -726,207 +803,210 @@ export const PrototypeWorkspace: React.FC = () => {
           </div>
 
           {/* Canvas Footer Legend */}
-          <div className="h-8 px-4 bg-white border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-600">
+          <div className="h-7 px-4 bg-white border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-600">
             <div className="flex items-center gap-4 font-medium">
               <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 inline-block"></span>
-                <span>OK (Within Tolerance)</span>
+                <span className="w-2 h-2 rounded-full bg-emerald-600 inline-block"></span>
+                <span>OK</span>
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span>
-                <span>To Check (Warning Boundary)</span>
+                <span className="w-2 h-2 rounded-full bg-amber-500 inline-block"></span>
+                <span>To Check</span>
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-red-600 inline-block"></span>
-                <span>Not Acceptable (Out of Tolerance)</span>
+                <span className="w-2 h-2 rounded-full bg-red-600 inline-block"></span>
+                <span>Not Acceptable</span>
               </span>
             </div>
 
-            <span className="font-mono text-slate-400">
-              Double-click balloon on canvas to edit configuration
+            <span className="font-mono text-slate-400 text-[10px]">
+              Drag balloon on canvas to stretch leader line • Double-click to configure
             </span>
           </div>
         </div>
 
-        {/* Right Side: Inspection Characteristics Table */}
-        <div className="w-full lg:w-[580px] xl:w-[640px] flex flex-col bg-white shrink-0 overflow-hidden">
-          {/* Table Header & Metrics Summary */}
-          <div className="p-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
-            <div>
-              <h2 className="font-bold text-xs text-slate-800 uppercase tracking-wider font-mono">
-                Dimensional Inspection Characteristics
-              </h2>
-              <p className="text-[11px] text-slate-500">
-                Total: <strong className="text-slate-800 font-mono">{balloons.length}</strong> Dimensions
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2 font-mono text-[11px]">
-              <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-300 font-semibold">
-                {okCount} OK
-              </span>
-              <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-300 font-semibold">
-                {checkCount} Check
-              </span>
-              <span className="px-2 py-0.5 rounded bg-red-50 text-red-800 border border-red-300 font-semibold">
-                {failCount} Reject
-              </span>
-            </div>
-          </div>
-
-          {/* Table Data Rows */}
-          <div className="flex-1 overflow-auto">
-            {balloons.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center p-6 text-center text-slate-400 space-y-2">
-                <Sliders className="w-8 h-8 text-slate-300" />
-                <p className="text-xs font-semibold text-slate-600">No Dimension Balloons Added</p>
-                <p className="text-[11px] max-w-xs text-slate-400">
-                  Select <strong>"Add Balloon"</strong> and click any measurement on the drawing to configure nominal dimensions and tolerance limits.
+        {/* Right Side: Inspection Characteristics Table (Collapsible & Compact) */}
+        {inspectionTabOpen && (
+          <div className="w-[420px] xl:w-[460px] flex flex-col bg-white border-l border-slate-200 shrink-0 overflow-hidden">
+            {/* Table Header */}
+            <div className="p-2.5 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+              <div>
+                <h2 className="font-bold text-[11px] text-slate-800 uppercase tracking-wider font-mono">
+                  Inspection Log
+                </h2>
+                <p className="text-[10px] text-slate-500">
+                  Total: <strong className="text-slate-800 font-mono">{balloons.length}</strong> Balloons
                 </p>
               </div>
-            ) : (
-              <table className="w-full text-left text-xs border-collapse">
-                <thead className="sticky top-0 z-10 bg-slate-100 text-slate-700 font-bold border-b border-slate-200 font-mono text-[11px]">
-                  <tr>
-                    <th className="py-2 px-2 text-center w-8">#</th>
-                    <th className="py-2 px-2.5">Parameter</th>
-                    <th className="py-2 px-2 text-right">Nominal</th>
-                    <th className="py-2 px-2 text-right">Tolerance</th>
-                    <th className="py-2 px-2 text-right">Limits</th>
-                    <th className="py-2 px-2 text-center min-w-[130px]">Actual Reading(s)</th>
-                    <th className="py-2 px-2 text-center">Status</th>
-                    <th className="py-2 px-1 text-center w-12">Actions</th>
-                  </tr>
-                </thead>
 
-                <tbody className="divide-y divide-slate-200 font-mono text-[11px]">
-                  {balloons.map((b) => {
-                    const isSelected = b.id === selectedBalloonId;
-                    const styleInfo = STATUS_STYLES[b.status] || STATUS_STYLES.PENDING;
+              <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-300 font-semibold">
+                  {okCount} OK
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-300 font-semibold">
+                  {checkCount} Check
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-red-50 text-red-800 border border-red-300 font-semibold">
+                  {failCount} Reject
+                </span>
+              </div>
+            </div>
 
-                    return (
-                      <tr
-                        key={b.id}
-                        onClick={() => setSelectedBalloonId(b.id)}
-                        className={`cursor-pointer transition-colors ${
-                          isSelected
-                            ? 'bg-blue-50/80 border-l-2 border-blue-600'
-                            : 'hover:bg-slate-50'
-                        }`}
-                      >
-                        {/* Balloon Number Badge */}
-                        <td className="py-2 px-2 text-center">
-                          <span
-                            className="w-5 h-5 rounded-full inline-flex items-center justify-center font-bold text-white text-[10px]"
-                            style={{ backgroundColor: styleInfo.border }}
-                          >
-                            {b.balloonNumber}
-                          </span>
-                        </td>
+            {/* Table Content */}
+            <div className="flex-1 overflow-auto">
+              {balloons.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center p-6 text-center text-slate-400 space-y-2">
+                  <Sliders className="w-7 h-7 text-slate-300" />
+                  <p className="text-xs font-semibold text-slate-600">No Balloons Added</p>
+                  <p className="text-[10px] max-w-xs text-slate-400">
+                    Click <strong>"Add Balloon"</strong> and click any measurement on the drawing.
+                  </p>
+                </div>
+              ) : (
+                <table className="w-full text-left text-[11px] border-collapse">
+                  <thead className="sticky top-0 z-10 bg-slate-100 text-slate-700 font-bold border-b border-slate-200 font-mono text-[10px]">
+                    <tr>
+                      <th className="py-2 px-2 text-center w-8">ID</th>
+                      <th className="py-2 px-2">Parameter</th>
+                      <th className="py-2 px-2 text-right">Nominal</th>
+                      <th className="py-2 px-2 text-right">Tol</th>
+                      <th className="py-2 px-2 text-center min-w-[80px]">Actual Reading</th>
+                      <th className="py-2 px-1 text-center">Status</th>
+                      <th className="py-2 px-1 text-center w-10"></th>
+                    </tr>
+                  </thead>
 
-                        {/* Parameter Name */}
-                        <td className="py-2 px-2.5 font-sans font-medium text-slate-800">
-                          {b.dimensionName}
-                        </td>
+                  <tbody className="divide-y divide-slate-200 font-mono text-[11px]">
+                    {balloons.map((b) => {
+                      const isSelected = b.id === selectedBalloonId;
+                      const formattedNum = formatBalloonNumber(b.balloonNumber);
+                      const styleInfo = STATUS_STYLES[b.overallStatus] || STATUS_STYLES.PENDING;
 
-                        {/* Nominal Drawing Dim */}
-                        <td className="py-2 px-2 text-right font-bold text-slate-900">
-                          {b.nominalValue !== null ? b.nominalValue.toFixed(3) : '-'}
-                        </td>
+                      return (
+                        <React.Fragment key={b.id}>
+                          {b.items.map((item, itemIdx) => {
+                            const itemStyle = STATUS_STYLES[item.status] || STATUS_STYLES.PENDING;
 
-                        {/* Tolerance */}
-                        <td className="py-2 px-2 text-right text-[10px]">
-                          <span className="text-emerald-700 font-medium block">
-                            +{b.upperTolerance?.toFixed(3) ?? '0.000'}
-                          </span>
-                          <span className="text-red-700 font-medium block">
-                            {b.lowerTolerance?.toFixed(3) ?? '0.000'}
-                          </span>
-                        </td>
+                            return (
+                              <tr
+                                key={`${b.id}-${itemIdx}`}
+                                onClick={() => setSelectedBalloonId(b.id)}
+                                className={`cursor-pointer transition-colors ${
+                                  isSelected
+                                    ? 'bg-blue-50/80 border-l-2 border-blue-600'
+                                    : 'hover:bg-slate-50'
+                                }`}
+                              >
+                                {/* Balloon 2-digit Number Badge (01, 02, 03) */}
+                                <td className="py-1.5 px-2 text-center">
+                                  {itemIdx === 0 ? (
+                                    <span
+                                      className="w-5 h-5 rounded-full inline-flex items-center justify-center font-bold text-white text-[10px]"
+                                      style={{ backgroundColor: styleInfo.border }}
+                                    >
+                                      {formattedNum}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[9px] text-slate-400 font-mono">↳</span>
+                                  )}
+                                </td>
 
-                        {/* Lower / Upper Limits */}
-                        <td className="py-2 px-2 text-right text-[10px] text-slate-500">
-                          <div>L: {b.lowerLimit?.toFixed(3) ?? '-'}</div>
-                          <div>U: {b.upperLimit?.toFixed(3) ?? '-'}</div>
-                        </td>
+                                {/* Parameter Name */}
+                                <td className="py-1.5 px-2 font-sans text-slate-800">
+                                  <div className="font-medium text-[11px] leading-tight">{item.name}</div>
+                                  {b.items.length > 1 && (
+                                    <span className="text-[9px] text-slate-400 font-mono">Item {itemIdx + 1}</span>
+                                  )}
+                                </td>
 
-                        {/* Actual Physical Readings (Single or Multiple) */}
-                        <td className="py-1.5 px-2 text-center">
-                          <div className="flex items-center justify-center gap-1">
-                            {Array.from({ length: b.observationCount || 1 }).map((_, obsIdx) => {
-                              const val = b.observations[obsIdx];
-                              return (
-                                <input
-                                  key={obsIdx}
-                                  type="number"
-                                  step="any"
-                                  value={val !== null && val !== undefined ? val : ''}
-                                  onChange={(e) =>
-                                    handleQuickObservationChange(b.id, obsIdx, e.target.value)
-                                  }
-                                  placeholder={`Obs ${obsIdx + 1}`}
-                                  className="w-16 bg-white border border-slate-300 rounded px-1.5 py-0.5 text-center font-bold text-slate-900 focus:outline-none focus:border-blue-600 text-[11px]"
-                                  title={`Observation ${obsIdx + 1}`}
-                                />
-                              );
-                            })}
-                          </div>
-                        </td>
+                                {/* Nominal Drawing Dim */}
+                                <td className="py-1.5 px-2 text-right font-bold text-slate-900">
+                                  {item.nominalValue !== null ? item.nominalValue.toFixed(2) : '-'}
+                                </td>
 
-                        {/* Status Result Badge */}
-                        <td className="py-2 px-2 text-center">
-                          <span
-                            className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-bold border ${styleInfo.badge}`}
-                          >
-                            {styleInfo.label}
-                          </span>
-                        </td>
+                                {/* Tolerance */}
+                                <td className="py-1.5 px-2 text-right text-[10px]">
+                                  <span className="text-emerald-700 font-medium block">
+                                    +{item.upperTolerance?.toFixed(2) ?? '0.00'}
+                                  </span>
+                                  <span className="text-red-700 font-medium block">
+                                    {item.lowerTolerance?.toFixed(2) ?? '0.00'}
+                                  </span>
+                                </td>
 
-                        {/* Actions */}
-                        <td className="py-2 px-1 text-center">
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openEditModalForBalloon(b);
-                              }}
-                              className="p-1 text-slate-500 hover:text-blue-700 rounded hover:bg-slate-100"
-                              title="Configure Dimension"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                            </button>
+                                {/* Actual Reading Input */}
+                                <td className="py-1 px-1.5 text-center">
+                                  <input
+                                    type="number"
+                                    step="any"
+                                    value={item.actualValue !== null && item.actualValue !== undefined ? item.actualValue : ''}
+                                    onChange={(e) =>
+                                      handleQuickReadingChange(b.id, itemIdx, e.target.value)
+                                    }
+                                    placeholder="Reading..."
+                                    className="w-20 bg-white border border-slate-300 rounded px-1.5 py-0.5 text-center font-bold text-slate-900 focus:outline-none focus:border-blue-600 text-[11px]"
+                                  />
+                                </td>
 
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                deleteBalloon(b.id);
-                              }}
-                              className="p-1 text-slate-400 hover:text-red-700 rounded hover:bg-slate-100"
-                              title="Delete Balloon"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
+                                {/* Status Badge */}
+                                <td className="py-1.5 px-1 text-center">
+                                  <span
+                                    className={`inline-block px-1.5 py-0.5 rounded text-[8px] font-bold border ${itemStyle.badge}`}
+                                  >
+                                    {itemStyle.label}
+                                  </span>
+                                </td>
+
+                                {/* Actions */}
+                                <td className="py-1.5 px-1 text-center">
+                                  {itemIdx === 0 && (
+                                    <div className="flex items-center justify-center gap-1">
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          openEditModalForBalloon(b);
+                                        }}
+                                        className="p-1 text-slate-500 hover:text-blue-700 rounded hover:bg-slate-100"
+                                        title="Configure Dimension"
+                                      >
+                                        <Edit2 className="w-3 h-3" />
+                                      </button>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          deleteBalloon(b.id);
+                                        }}
+                                        className="p-1 text-slate-400 hover:text-red-700 rounded hover:bg-slate-100"
+                                        title="Delete Balloon"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* 3. Configure Dimension Dialog Box Modal */}
       {configModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-[1px]">
-          <div className="bg-white border border-slate-300 rounded-lg shadow-xl max-w-md w-full overflow-hidden text-xs">
+          <div className="bg-white border border-slate-300 rounded-lg shadow-xl max-w-lg w-full overflow-hidden text-xs max-h-[90vh] flex flex-col">
             {/* Modal Header */}
-            <div className="px-5 py-3 bg-slate-800 text-white flex items-center justify-between">
+            <div className="px-4 py-2.5 bg-slate-800 text-white flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
                 <span className="px-2 py-0.5 bg-blue-600 text-white rounded font-mono font-bold text-xs">
-                  Balloon #{modalData.balloonNumber}
+                  Balloon {formatBalloonNumber(modalData.balloonNumber)}
                 </span>
                 <h3 className="font-bold text-sm">Configure Dimension</h3>
               </div>
@@ -938,47 +1018,18 @@ export const PrototypeWorkspace: React.FC = () => {
               </button>
             </div>
 
-            {/* Form Fields */}
-            <div className="p-5 space-y-3.5">
-              {/* Parameter / Feature Name */}
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">
-                  Dimension Feature Name
-                </label>
-                <input
-                  type="text"
-                  value={modalData.dimensionName}
-                  onChange={(e) => setModalData({ ...modalData, dimensionName: e.target.value })}
-                  placeholder="e.g. Hole Center Distance, Flange Outer Diameter, Slot Width"
-                  className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-slate-900 focus:outline-none focus:border-blue-600 text-xs"
-                />
-              </div>
-
-              {/* Drawing Dimension (Nominal) & Unit */}
-              <div className="grid grid-cols-3 gap-3">
-                <div className="col-span-2">
-                  <label className="block text-slate-700 font-semibold mb-1">
-                    Drawing Dimension (Nominal)
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    required
-                    value={modalData.nominalValue}
-                    onChange={(e) => setModalData({ ...modalData, nominalValue: e.target.value })}
-                    placeholder="25.00"
-                    className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 font-mono font-bold text-slate-900 focus:outline-none focus:border-blue-600"
-                  />
-                </div>
-
+            {/* Modal Scrollable Form Body */}
+            <div className="p-4 space-y-3 overflow-auto flex-1">
+              {/* Unit & Acceptance Level */}
+              <div className="grid grid-cols-2 gap-3 p-2.5 bg-slate-50 border border-slate-200 rounded">
                 <div>
-                  <label className="block text-slate-700 font-semibold mb-1">
-                    Unit
+                  <label className="block text-slate-600 text-[11px] font-semibold mb-0.5">
+                    Dimension Unit
                   </label>
                   <select
                     value={modalData.unit}
                     onChange={(e) => setModalData({ ...modalData, unit: e.target.value })}
-                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 font-mono text-slate-900 focus:outline-none focus:border-blue-600"
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1 font-mono text-slate-900 focus:outline-none focus:border-blue-600"
                   >
                     <option value="mm">mm</option>
                     <option value="in">inch</option>
@@ -986,129 +1037,178 @@ export const PrototypeWorkspace: React.FC = () => {
                     <option value="rad">rad</option>
                   </select>
                 </div>
-              </div>
-
-              {/* Manual Tolerance Acceptance Level */}
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded space-y-2">
-                <span className="block font-bold text-slate-800 text-[11px] uppercase tracking-wide">
-                  Tolerance & Acceptance Level
-                </span>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-slate-600 text-[11px] mb-0.5">
-                      + Upper Tolerance
-                    </label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={modalData.upperTolerance}
-                      onChange={(e) => setModalData({ ...modalData, upperTolerance: e.target.value })}
-                      placeholder="+0.10"
-                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1 text-emerald-800 font-mono font-bold"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-slate-600 text-[11px] mb-0.5">
-                      - Lower Tolerance
-                    </label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={modalData.lowerTolerance}
-                      onChange={(e) => setModalData({ ...modalData, lowerTolerance: e.target.value })}
-                      placeholder="-0.10"
-                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1 text-red-800 font-mono font-bold"
-                    />
-                  </div>
-                </div>
 
                 <div>
-                  <label className="block text-slate-600 text-[11px] mb-0.5">
-                    Acceptance Warning Boundary (% near limit for "To Check")
+                  <label className="block text-slate-600 text-[11px] font-semibold mb-0.5">
+                    Tolerance Warning Limit
                   </label>
                   <select
                     value={modalData.warningThresholdPercent}
                     onChange={(e) =>
                       setModalData({ ...modalData, warningThresholdPercent: parseInt(e.target.value) || 10 })
                     }
-                    className="w-full bg-white border border-slate-300 rounded px-2 py-1 text-slate-800 font-mono"
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1 font-mono text-slate-900 focus:outline-none focus:border-blue-600"
                   >
-                    <option value="5">5% of tolerance range</option>
-                    <option value="10">10% of tolerance range (Standard)</option>
-                    <option value="15">15% of tolerance range</option>
-                    <option value="20">20% of tolerance range</option>
+                    <option value="5">5% of tolerance limit</option>
+                    <option value="10">10% of tolerance limit (Standard)</option>
+                    <option value="15">15% of tolerance limit</option>
+                    <option value="20">20% of tolerance limit</option>
                   </select>
                 </div>
               </div>
 
-              {/* Number of Dimensions / Observation Readings */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-slate-700 font-semibold">
-                    Number of Readings / Observations
-                  </label>
+              {/* Number of Dimensions Selector (1 to 4) */}
+              <div className="flex items-center justify-between pb-1 border-b border-slate-200">
+                <span className="font-bold text-slate-800 text-xs">
+                  Dimension Feature Items
+                </span>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-500">Count:</span>
                   <select
-                    value={modalData.observationCount}
+                    value={modalData.subDimensions.length}
                     onChange={(e) => {
                       const count = parseInt(e.target.value) || 1;
-                      const current = [...modalData.observations];
-                      while (current.length < count) current.push('');
+                      const current = [...modalData.subDimensions];
+                      const defaultNames = ['Length', 'Breadth', 'Height / Depth', 'Diameter'];
+                      while (current.length < count) {
+                        const idx = current.length;
+                        current.push({
+                          name: defaultNames[idx] || `Dim 0${idx + 1}`,
+                          nominalValue: '25.00',
+                          upperTolerance: '0.10',
+                          lowerTolerance: '-0.10',
+                          actualValue: ''
+                        });
+                      }
                       setModalData({
                         ...modalData,
-                        observationCount: count,
-                        observations: current.slice(0, count)
+                        subDimensions: current.slice(0, count)
                       });
                     }}
-                    className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-slate-900"
+                    className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-slate-900 font-bold"
                   >
-                    <option value="1">1 Reading (Single Dimension)</option>
-                    <option value="2">2 Readings (e.g. Length, Breadth)</option>
-                    <option value="3">3 Readings (Obs 01, Obs 02, Obs 03)</option>
-                    <option value="4">4 Readings (4 Samples / Repeat)</option>
-                    <option value="5">5 Readings (5 Samples / Repeat)</option>
+                    <option value="1">1 Dimension (Single)</option>
+                    <option value="2">2 Dimensions (e.g. Length & Breadth)</option>
+                    <option value="3">3 Dimensions (e.g. Length, Breadth, Depth)</option>
+                    <option value="4">4 Dimensions (Multi-Feature)</option>
                   </select>
                 </div>
+              </div>
 
-                {/* Dynamic Observation Input Fields */}
-                <div className="grid grid-cols-3 gap-2 mt-2">
-                  {Array.from({ length: modalData.observationCount }).map((_, idx) => (
-                    <div key={idx}>
-                      <label className="block text-slate-500 text-[10px] mb-0.5">
-                        Reading {idx + 1}
-                      </label>
+              {/* Sub-Dimension Items: Each with its OWN Nominal, Tolerances, and Reading */}
+              <div className="space-y-2.5">
+                {modalData.subDimensions.map((sub, idx) => (
+                  <div key={idx} className="p-3 border border-slate-200 rounded bg-white space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-700 text-[11px] font-mono">
+                        Item {idx + 1}
+                      </span>
                       <input
-                        type="number"
-                        step="any"
-                        value={modalData.observations[idx] || ''}
+                        type="text"
+                        value={sub.name}
                         onChange={(e) => {
-                          const updated = [...modalData.observations];
-                          updated[idx] = e.target.value;
-                          setModalData({ ...modalData, observations: updated });
+                          const updated = [...modalData.subDimensions];
+                          updated[idx].name = e.target.value;
+                          setModalData({ ...modalData, subDimensions: updated });
                         }}
-                        placeholder={`Obs ${idx + 1}`}
-                        className="w-full bg-white border border-slate-300 rounded px-2 py-1 font-mono font-bold text-slate-900 focus:outline-none focus:border-blue-600"
+                        placeholder={`e.g. ${idx === 0 ? 'Length / Outer Dia' : idx === 1 ? 'Breadth / Width' : 'Depth'}`}
+                        className="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-800 w-48 font-medium focus:outline-none focus:border-blue-600"
                       />
                     </div>
-                  ))}
-                </div>
+
+                    <div className="grid grid-cols-4 gap-2">
+                      <div>
+                        <label className="block text-slate-500 text-[10px] mb-0.5">
+                          Drawing Dim (Nominal)
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          required
+                          value={sub.nominalValue}
+                          onChange={(e) => {
+                            const updated = [...modalData.subDimensions];
+                            updated[idx].nominalValue = e.target.value;
+                            setModalData({ ...modalData, subDimensions: updated });
+                          }}
+                          placeholder="25.00"
+                          className="w-full bg-white border border-slate-300 rounded px-2 py-1 font-mono font-bold text-slate-900 focus:outline-none focus:border-blue-600"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-500 text-[10px] mb-0.5">
+                          + Upper Tol
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          value={sub.upperTolerance}
+                          onChange={(e) => {
+                            const updated = [...modalData.subDimensions];
+                            updated[idx].upperTolerance = e.target.value;
+                            setModalData({ ...modalData, subDimensions: updated });
+                          }}
+                          placeholder="+0.10"
+                          className="w-full bg-white border border-slate-300 rounded px-2 py-1 font-mono font-bold text-emerald-800 focus:outline-none focus:border-blue-600"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-500 text-[10px] mb-0.5">
+                          - Lower Tol
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          value={sub.lowerTolerance}
+                          onChange={(e) => {
+                            const updated = [...modalData.subDimensions];
+                            updated[idx].lowerTolerance = e.target.value;
+                            setModalData({ ...modalData, subDimensions: updated });
+                          }}
+                          placeholder="-0.10"
+                          className="w-full bg-white border border-slate-300 rounded px-2 py-1 font-mono font-bold text-red-800 focus:outline-none focus:border-blue-600"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-500 text-[10px] mb-0.5">
+                          Actual Reading
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          value={sub.actualValue}
+                          onChange={(e) => {
+                            const updated = [...modalData.subDimensions];
+                            updated[idx].actualValue = e.target.value;
+                            setModalData({ ...modalData, subDimensions: updated });
+                          }}
+                          placeholder="Measured"
+                          className="w-full bg-white border border-slate-300 rounded px-2 py-1 font-mono font-bold text-slate-900 focus:outline-none focus:border-blue-600"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
 
             {/* Modal Actions */}
-            <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+            <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2 shrink-0">
               <button
                 type="button"
                 onClick={() => setConfigModalOpen(false)}
-                className="px-3 py-1.5 rounded border border-slate-300 text-slate-700 hover:bg-slate-100 font-medium"
+                className="px-3 py-1 rounded border border-slate-300 text-slate-700 hover:bg-slate-100 font-medium"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={handleSaveModalDimension}
-                className="px-4 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-semibold flex items-center gap-1.5 shadow-sm"
+                className="px-4 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white font-semibold flex items-center gap-1.5 shadow-sm"
               >
                 <Check className="w-3.5 h-3.5" />
                 <span>Save Dimension</span>
