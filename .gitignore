@@ -31,3 +31,5 @@ reports/*
 .DS_Store
 .vscode/
 .idea/
+
+/generated/prisma
