@@ -1,7 +1,7 @@
 export interface ToleranceResult {
   lowerLimit: number;
   upperLimit: number;
-  status: 'PASS' | 'CHECK' | 'FAIL' | 'PENDING';
+  status: 'OK' | 'TO CHECK' | 'NOT ACCEPTABLE' | 'PENDING';
   message: string;
 }
 
@@ -17,16 +17,15 @@ export function calculateTolerance(
       lowerLimit: 0,
       upperLimit: 0,
       status: 'PENDING',
-      message: 'Nominal dimension is required'
+      message: 'Nominal drawing dimension required'
     };
   }
 
   const upperTol = upperTolerance !== null && upperTolerance !== undefined && !isNaN(upperTolerance) ? upperTolerance : 0;
   const lowerTol = lowerTolerance !== null && lowerTolerance !== undefined && !isNaN(lowerTolerance) ? lowerTolerance : 0;
 
-  // In standard engineering drawings:
-  // If lowerTol is given as positive e.g. 0.05 when upper is +0.05 (symmetric ±0.05), lower offset is negative.
-  // If lowerTol is already negative e.g. -0.10, upperLimit = nominal + upperTol, lowerLimit = nominal + lowerTol.
+  // Handle standard symmetric and asymmetric tolerances:
+  // e.g. if lowerTol is +0.05 while upperTol is +0.05, it means ±0.05 -> lower offset is -0.05
   const effectiveLowerTol = lowerTol > 0 && upperTol >= 0 ? -lowerTol : lowerTol;
   
   const upperLimit = Number((nominalValue + upperTol).toFixed(4));
@@ -37,21 +36,21 @@ export function calculateTolerance(
       lowerLimit,
       upperLimit,
       status: 'PENDING',
-      message: 'Actual physical measurement pending'
+      message: 'Measurement reading pending'
     };
   }
 
-  // Check out of bounds (FAIL)
+  // Check out of bounds (NOT ACCEPTABLE / FAIL)
   if (actualValue < lowerLimit || actualValue > upperLimit) {
     return {
       lowerLimit,
       upperLimit,
-      status: 'FAIL',
-      message: `Actual ${actualValue} is out of limits [${lowerLimit}, ${upperLimit}]`
+      status: 'NOT ACCEPTABLE',
+      message: `Reading ${actualValue} exceeds tolerance limits [${lowerLimit}, ${upperLimit}]`
     };
   }
 
-  // Within bounds -> check if near upper or lower boundary (CHECK)
+  // Check boundary margin (TO CHECK / YELLOW)
   const totalRange = upperLimit - lowerLimit;
   if (totalRange > 0) {
     const margin = totalRange * (checkThresholdPercent / 100);
@@ -61,17 +60,65 @@ export function calculateTolerance(
       return {
         lowerLimit,
         upperLimit,
-        status: 'CHECK',
-        message: `Actual ${actualValue} is within ${checkThresholdPercent}% of tolerance boundary`
+        status: 'TO CHECK',
+        message: `Reading ${actualValue} is within ${checkThresholdPercent}% of tolerance boundary`
       };
     }
   }
 
-  // Strictly in tolerance (PASS)
+  // In tolerance (OK / GREEN)
   return {
     lowerLimit,
     upperLimit,
-    status: 'PASS',
-    message: `Actual ${actualValue} is within specification [${lowerLimit}, ${upperLimit}]`
+    status: 'OK',
+    message: `Reading ${actualValue} is within acceptable tolerance limits`
+  };
+}
+
+export function evaluateMultiReadings(
+  nominalValue: number | null | undefined,
+  upperTolerance: number | null | undefined,
+  lowerTolerance: number | null | undefined,
+  readings: (number | null | undefined)[],
+  checkThresholdPercent: number = 10
+): ToleranceResult {
+  const validReadings = readings.filter((r): r is number => r !== null && r !== undefined && !isNaN(r));
+
+  if (validReadings.length === 0) {
+    return calculateTolerance(nominalValue, upperTolerance, lowerTolerance, null, checkThresholdPercent);
+  }
+
+  // Calculate status for each reading
+  const results = validReadings.map((r) =>
+    calculateTolerance(nominalValue, upperTolerance, lowerTolerance, r, checkThresholdPercent)
+  );
+
+  const lowerLimit = results[0].lowerLimit;
+  const upperLimit = results[0].upperLimit;
+
+  // Worst-case status wins: NOT ACCEPTABLE > TO CHECK > OK
+  if (results.some((res) => res.status === 'NOT ACCEPTABLE')) {
+    return {
+      lowerLimit,
+      upperLimit,
+      status: 'NOT ACCEPTABLE',
+      message: 'One or more observation readings exceed tolerance limits'
+    };
+  }
+
+  if (results.some((res) => res.status === 'TO CHECK')) {
+    return {
+      lowerLimit,
+      upperLimit,
+      status: 'TO CHECK',
+      message: 'One or more observation readings are near the tolerance boundary'
+    };
+  }
+
+  return {
+    lowerLimit,
+    upperLimit,
+    status: 'OK',
+    message: 'All observation readings are within specification'
   };
 }

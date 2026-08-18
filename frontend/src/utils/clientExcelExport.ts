@@ -8,6 +8,8 @@ export interface ExportBalloonData {
   lowerTolerance: number | null;
   lowerLimit: number | null;
   upperLimit: number | null;
+  observationCount?: number;
+  observations?: (number | null)[];
   actualValue: number | null;
   unit: string;
   status: string;
@@ -29,7 +31,7 @@ export async function exportInspectionToExcel(
   items: ExportBalloonData[]
 ): Promise<void> {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = 'Valmet Inspection Ballooning Tool';
+  workbook.creator = 'Valmet Dimension Ballooning & Quality Inspection Platform';
   workbook.created = new Date();
 
   const worksheet = workbook.addWorksheet('Inspection Report', {
@@ -37,80 +39,81 @@ export async function exportInspectionToExcel(
     views: [{ showGridLines: true }]
   });
 
-  // Styles definition
+  // Industrial Styling: Classic Precision Engineering
   const titleFill: ExcelJS.Fill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FF0F172A' } // Dark Slate
-  };
-
-  const headerFill: ExcelJS.Fill = {
     type: 'pattern',
     pattern: 'solid',
     fgColor: { argb: 'FF1E293B' } // Slate 800
   };
 
+  const headerFill: ExcelJS.Fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF334155' } // Slate 700
+  };
+
   // 1. Title Banner
-  worksheet.mergeCells('A1:K1');
+  worksheet.mergeCells('A1:L1');
   const titleCell = worksheet.getCell('A1');
-  titleCell.value = 'VALMET QUALITY INSPECTION REPORT (FAIR / PPAP)';
-  titleCell.font = { name: 'Arial', size: 15, bold: true, color: { argb: 'FFFFFFFF' } };
+  titleCell.value = 'LAYOUT & DIMENSIONAL QUALITY INSPECTION REPORT (VALMET / FAIR)';
+  titleCell.font = { name: 'Arial', size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
   titleCell.fill = titleFill;
   titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
-  worksheet.getRow(1).height = 32;
+  worksheet.getRow(1).height = 30;
 
-  // 2. Metadata Section (Rows 3 to 6)
+  // 2. Metadata Section (Rows 3-6)
   const metadataRows = [
-    ['Company:', meta.companyName || 'Valmet Quality Assurance / Industrial Precision', '', '', 'Inspection Date:', meta.inspectionDate],
-    ['Part Name:', meta.partName || 'Cast Machined Console', '', '', 'Inspector:', meta.inspectorName || 'Lead QA Inspector'],
-    ['Part Number:', meta.partNumber || 'VAL-8492-MK2', '', '', 'Drawing Ref:', meta.drawingRef || 'DWG-CONSOLE-001'],
-    ['Revision:', meta.revision || 'Rev B', '', '', 'Total Checks:', `${items.length} Dimensions`]
+    ['Customer:', meta.companyName || 'Valmet Corporation', '', '', 'Inspection Date:', meta.inspectionDate],
+    ['Part Name:', meta.partName || 'Cast Console / Housing', '', '', 'Inspector Name:', meta.inspectorName || 'QA Inspector'],
+    ['Part / Article #:', meta.partNumber || 'VAL-8492-MK2', '', '', 'Drawing Ref:', meta.drawingRef || 'DWG-94050440201'],
+    ['Drawing Revision:', meta.revision || 'Rev 05', '', '', 'Total Dimensions:', `${items.length} Ballooned Characteristics`]
   ];
 
   metadataRows.forEach((row, idx) => {
     const rowNum = 3 + idx;
     worksheet.getCell(`A${rowNum}`).value = row[0];
-    worksheet.getCell(`A${rowNum}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF475569' } };
+    worksheet.getCell(`A${rowNum}`).font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FF475569' } };
     
     worksheet.getCell(`B${rowNum}`).value = row[1];
     worksheet.getCell(`B${rowNum}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF0F172A' } };
 
-    worksheet.getCell(`E${rowNum}`).value = row[4];
-    worksheet.getCell(`E${rowNum}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF475569' } };
+    worksheet.getCell(`F${rowNum}`).value = row[4];
+    worksheet.getCell(`F${rowNum}`).font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FF475569' } };
 
-    worksheet.getCell(`F${rowNum}`).value = row[5];
-    worksheet.getCell(`F${rowNum}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF0F172A' } };
+    worksheet.getCell(`G${rowNum}`).value = row[5];
+    worksheet.getCell(`G${rowNum}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF0F172A' } };
     
-    worksheet.getRow(rowNum).height = 20;
+    worksheet.getRow(rowNum).height = 19;
   });
 
-  worksheet.getRow(7).height = 10;
+  worksheet.getRow(7).height = 8;
 
-  // 3. Table Column Headers
+  // 3. Table Column Headers (Row 8)
   const columns = [
-    { header: 'Balloon #', key: 'balloonNumber', width: 12 },
-    { header: 'Dimension Characteristic', key: 'dimensionName', width: 26 },
-    { header: 'Nominal', key: 'nominalValue', width: 14 },
-    { header: '+Tol', key: 'upperTolerance', width: 12 },
-    { header: '-Tol', key: 'lowerTolerance', width: 12 },
-    { header: 'Lower Limit', key: 'lowerLimit', width: 14 },
-    { header: 'Upper Limit', key: 'upperLimit', width: 14 },
-    { header: 'Actual Measured', key: 'actualValue', width: 16 },
-    { header: 'Unit', key: 'unit', width: 10 },
-    { header: 'Status', key: 'status', width: 15 },
-    { header: 'Remarks / Notes', key: 'remarks', width: 24 }
+    { header: 'Item #', key: 'balloonNumber', width: 8 },
+    { header: 'Dimension Parameter', key: 'dimensionName', width: 28 },
+    { header: 'Nominal', key: 'nominalValue', width: 12 },
+    { header: '+Tol', key: 'upperTolerance', width: 10 },
+    { header: '-Tol', key: 'lowerTolerance', width: 10 },
+    { header: 'Lower Limit', key: 'lowerLimit', width: 12 },
+    { header: 'Upper Limit', key: 'upperLimit', width: 12 },
+    { header: 'Obs 01', key: 'obs1', width: 12 },
+    { header: 'Obs 02', key: 'obs2', width: 12 },
+    { header: 'Obs 03', key: 'obs3', width: 12 },
+    { header: 'Unit', key: 'unit', width: 8 },
+    { header: 'Status / Result', key: 'status', width: 16 }
   ];
 
   const headerRow = worksheet.getRow(8);
   columns.forEach((col, idx) => {
     const cell = headerRow.getCell(idx + 1);
     cell.value = col.header;
-    cell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
     cell.fill = headerFill;
     cell.alignment = { horizontal: 'center', vertical: 'middle' };
     worksheet.getColumn(idx + 1).width = col.width;
   });
-  headerRow.height = 26;
+  headerRow.height = 24;
 
   // 4. Data Rows
   items.forEach((item, index) => {
@@ -124,45 +127,48 @@ export async function exportInspectionToExcel(
     row.getCell(5).value = item.lowerTolerance !== null && item.lowerTolerance !== undefined ? item.lowerTolerance : '-';
     row.getCell(6).value = item.lowerLimit !== null && item.lowerLimit !== undefined ? item.lowerLimit : '-';
     row.getCell(7).value = item.upperLimit !== null && item.upperLimit !== undefined ? item.upperLimit : '-';
-    row.getCell(8).value = item.actualValue !== null && item.actualValue !== undefined ? item.actualValue : '-';
-    row.getCell(9).value = item.unit || 'mm';
+
+    // Observations
+    const obs = item.observations || [item.actualValue];
+    row.getCell(8).value = obs[0] !== null && obs[0] !== undefined ? obs[0] : (item.actualValue !== null && item.actualValue !== undefined ? item.actualValue : '-');
+    row.getCell(9).value = obs[1] !== null && obs[1] !== undefined ? obs[1] : '-';
+    row.getCell(10).value = obs[2] !== null && obs[2] !== undefined ? obs[2] : '-';
+
+    row.getCell(11).value = item.unit || 'mm';
 
     const status = (item.status || 'PENDING').toUpperCase();
-    const statusCell = row.getCell(10);
-    statusCell.value = status;
+    const statusCell = row.getCell(12);
+    statusCell.value = status === 'OK' || status === 'PASS' ? 'OK' : status === 'TO CHECK' || status === 'CHECK' ? 'TO CHECK' : status === 'NOT ACCEPTABLE' || status === 'FAIL' ? 'NOT ACCEPTABLE' : 'PENDING';
 
-    row.getCell(11).value = item.remarks || '';
-
-    // Cell Alignment & Number Formatting
+    // Alignment & Formatting
     row.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
     row.getCell(2).alignment = { horizontal: 'left', vertical: 'middle' };
-    for (let c = 3; c <= 8; c++) {
+    for (let c = 3; c <= 10; c++) {
       row.getCell(c).alignment = { horizontal: 'right', vertical: 'middle' };
       if (typeof row.getCell(c).value === 'number') {
         row.getCell(c).numFmt = '0.000';
       }
     }
-    row.getCell(9).alignment = { horizontal: 'center', vertical: 'middle' };
+    row.getCell(11).alignment = { horizontal: 'center', vertical: 'middle' };
     statusCell.alignment = { horizontal: 'center', vertical: 'middle' };
-    row.getCell(11).alignment = { horizontal: 'left', vertical: 'middle' };
 
-    // Status Coloring
-    if (status === 'PASS' || status === 'OK') {
+    // Clean Engineering Status Colors
+    if (status === 'OK' || status === 'PASS') {
       statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1FAE5' } };
-      statusCell.font = { name: 'Arial', size: 10, color: { argb: 'FF065F46' }, bold: true };
-    } else if (status === 'CHECK' || status === 'TO CHECK') {
+      statusCell.font = { name: 'Arial', size: 9, color: { argb: 'FF065F46' }, bold: true };
+    } else if (status === 'TO CHECK' || status === 'CHECK') {
       statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
-      statusCell.font = { name: 'Arial', size: 10, color: { argb: 'FF92400E' }, bold: true };
-    } else if (status === 'FAIL' || status === 'NOT ACCEPTABLE') {
+      statusCell.font = { name: 'Arial', size: 9, color: { argb: 'FF92400E' }, bold: true };
+    } else if (status === 'NOT ACCEPTABLE' || status === 'FAIL') {
       statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } };
-      statusCell.font = { name: 'Arial', size: 10, color: { argb: 'FF991B1B' }, bold: true };
+      statusCell.font = { name: 'Arial', size: 9, color: { argb: 'FF991B1B' }, bold: true };
     } else {
-      statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDBEAFE' } };
-      statusCell.font = { name: 'Arial', size: 10, color: { argb: 'FF1E40AF' }, bold: true };
+      statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
+      statusCell.font = { name: 'Arial', size: 9, color: { argb: 'FF64748B' }, bold: true };
     }
 
-    // Border
-    for (let c = 1; c <= 11; c++) {
+    // Standard Thin Borders
+    for (let c = 1; c <= 12; c++) {
       row.getCell(c).border = {
         top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
         left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
@@ -171,10 +177,9 @@ export async function exportInspectionToExcel(
       };
     }
 
-    row.height = 24;
+    row.height = 22;
   });
 
-  // Write and Trigger Download in Browser
   const buffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -183,7 +188,7 @@ export async function exportInspectionToExcel(
   const url = window.URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = `Valmet_Inspection_${meta.partNumber || 'Part'}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  anchor.download = `Valmet_Inspection_Sheet_${meta.partNumber || 'Part'}_${new Date().toISOString().slice(0, 10)}.xlsx`;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();

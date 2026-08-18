@@ -8,74 +8,72 @@ import {
   Trash2,
   ZoomIn,
   ZoomOut,
-  Maximize2,
   RotateCcw,
-  CheckCircle2,
-  AlertTriangle,
-  XCircle,
-  Clock,
-  Sparkles,
-  Layers,
   MousePointer,
-  HelpCircle,
   FileText,
-  Sliders
+  Sliders,
+  Edit2,
+  Check,
+  X
 } from 'lucide-react';
-import { calculateTolerance, ToleranceResult } from '../utils/toleranceEngine';
+import { calculateTolerance, evaluateMultiReadings, ToleranceResult } from '../utils/toleranceEngine';
 import { exportInspectionToExcel, ExportBalloonData } from '../utils/clientExcelExport';
-import { VALMET_SAMPLE_DRAWING_SVG, SAMPLE_PRELOADED_BALLOONS } from '../assets/sampleDrawings';
+import { VALMET_SAMPLE_DRAWING_SVG } from '../assets/sampleDrawings';
 
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 export interface PrototypeBalloon {
   id: string;
-  balloonNumber: number;
+  balloonNumber: number; // strictly sequential (locked)
   dimensionName: string;
-  nominalValue: number | null;
+  unit: string;
+  nominalValue: number | null; // Drawing Dim from diagram
   upperTolerance: number | null;
   lowerTolerance: number | null;
+  warningThresholdPercent: number; // Acceptance level %
+  observationCount: number; // Number of dimension readings (1, 2, 3...)
+  observations: (number | null)[]; // Actual physical readings
   lowerLimit: number | null;
   upperLimit: number | null;
-  actualValue: number | null;
-  unit: string;
-  status: 'PASS' | 'CHECK' | 'FAIL' | 'PENDING';
+  status: 'OK' | 'TO CHECK' | 'NOT ACCEPTABLE' | 'PENDING';
   remarks?: string;
-  // Normalized coordinates [0..1]
+  // Normalized canvas coordinates [0..1]
   x: number;
   y: number;
   leaderStartX?: number;
   leaderStartY?: number;
 }
 
-const STATUS_COLORS: Record<string, { fill: string; border: string; text: string; label: string; badgeBg: string }> = {
-  PASS: {
-    fill: '#D1FAE5',
-    border: '#10B981',
-    text: '#065F46',
-    label: 'OK / PASS',
-    badgeBg: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950/80 dark:text-emerald-300 dark:border-emerald-700'
+// Clean industrial technical color palette
+const STATUS_STYLES: Record<string, { fill: string; border: string; text: string; label: string; badge: string }> = {
+  OK: {
+    fill: '#E6F4EA',
+    border: '#1E8E3E',
+    text: '#137333',
+    label: 'OK',
+    badge: 'bg-emerald-50 text-emerald-800 border-emerald-300'
   },
-  CHECK: {
-    fill: '#FEF3C7',
-    border: '#F59E0B',
-    text: '#92400E',
+  'TO CHECK': {
+    fill: '#FEF7E0',
+    border: '#F9AB00',
+    text: '#B06000',
     label: 'TO CHECK',
-    badgeBg: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/80 dark:text-amber-300 dark:border-amber-700'
+    badge: 'bg-amber-50 text-amber-800 border-amber-300'
   },
-  FAIL: {
-    fill: '#FEE2E2',
-    border: '#EF4444',
-    text: '#991B1B',
-    label: 'OUT OF SPEC',
-    badgeBg: 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-950/80 dark:text-rose-300 dark:border-rose-700'
+  'NOT ACCEPTABLE': {
+    fill: '#FCE8E6',
+    border: '#D93025',
+    text: '#C5221F',
+    label: 'NOT ACCEPTABLE',
+    badge: 'bg-red-50 text-red-800 border-red-300'
   },
   PENDING: {
-    fill: '#DBEAFE',
-    border: '#3B82F6',
-    text: '#1E40AF',
+    fill: '#E8F0FE',
+    border: '#1A73E8',
+    text: '#174EA6',
     label: 'PENDING',
-    badgeBg: 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-950/80 dark:text-blue-300 dark:border-blue-700'
+    badge: 'bg-blue-50 text-blue-800 border-blue-200'
   }
 };
 
@@ -83,67 +81,72 @@ export const PrototypeWorkspace: React.FC = () => {
   // Drawing Canvas State
   const [drawingType, setDrawingType] = useState<'SAMPLE_SVG' | 'IMAGE' | 'PDF'>('SAMPLE_SVG');
   const [drawingSrc, setDrawingSrc] = useState<string>('');
-  const [drawingName, setDrawingName] = useState<string>('Valmet Machined Console (VAL-8492)');
+  const [drawingName, setDrawingName] = useState<string>('Console Machining Drawing');
   const [partNumber, setPartNumber] = useState<string>('VAL-8492-MK2');
   const [revision, setRevision] = useState<string>('Rev 05');
 
-  // Drawing Viewport Canvas
+  // Canvas References & Scaling
   const bgCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
 
   const [canvasDim, setCanvasDim] = useState<{ width: number; height: number }>({ width: 1000, height: 700 });
-  const [scale, setScale] = useState<number>(1.0);
+  const [zoomScale, setZoomScale] = useState<number>(1.0);
   const [activeTool, setActiveTool] = useState<'BALLOON' | 'SELECT'>('BALLOON');
 
   // Inspection Balloons
   const [balloons, setBalloons] = useState<PrototypeBalloon[]>([]);
   const [selectedBalloonId, setSelectedBalloonId] = useState<string | null>(null);
 
-  // Mini-Dialog Modal for Balloon editing
-  const [editModalOpen, setEditModalOpen] = useState<boolean>(false);
-  const [modalBalloon, setModalBalloon] = useState<PrototypeBalloon | null>(null);
+  // Configure Dimension Dialog Box State
+  const [configModalOpen, setConfigModalOpen] = useState<boolean>(false);
+  const [modalData, setModalData] = useState<{
+    id: string;
+    balloonNumber: number;
+    dimensionName: string;
+    unit: string;
+    nominalValue: string;
+    upperTolerance: string;
+    lowerTolerance: string;
+    warningThresholdPercent: number;
+    observationCount: number;
+    observations: string[];
+    remarks: string;
+    isNew: boolean;
+    normX: number;
+    normY: number;
+    leaderStartX?: number;
+    leaderStartY?: number;
+  }>({
+    id: '',
+    balloonNumber: 1,
+    dimensionName: '',
+    unit: 'mm',
+    nominalValue: '25.00',
+    upperTolerance: '0.10',
+    lowerTolerance: '-0.10',
+    warningThresholdPercent: 10,
+    observationCount: 1,
+    observations: [''],
+    remarks: '',
+    isNew: false,
+    normX: 0.5,
+    normY: 0.5
+  });
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Initialize Drawing on Mount with Sample Drawing
+  // Initialize Default Technical Drawing on Mount
   useEffect(() => {
-    loadSampleDrawing();
+    loadInitialBlueprint();
   }, []);
 
-  const loadSampleDrawing = () => {
+  const loadInitialBlueprint = () => {
     setDrawingType('SAMPLE_SVG');
-    setDrawingName('Valmet Machined Console (DWG 94050440201)');
-    setPartNumber('VAL-8492-MK2');
-    setRevision('Rev 05');
-
     const svgBlob = new Blob([VALMET_SAMPLE_DRAWING_SVG], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(svgBlob);
     setDrawingSrc(url);
-
-    // Pre-populate sample Valmet balloons
-    const initialBalloons: PrototypeBalloon[] = SAMPLE_PRELOADED_BALLOONS.map((p) => {
-      const tol = calculateTolerance(p.nominalValue, p.upperTolerance, p.lowerTolerance, p.actualValue);
-      return {
-        id: `b-${p.balloonNumber}-${Date.now()}`,
-        balloonNumber: p.balloonNumber,
-        dimensionName: p.dimensionName,
-        nominalValue: p.nominalValue,
-        upperTolerance: p.upperTolerance,
-        lowerTolerance: p.lowerTolerance,
-        lowerLimit: tol.lowerLimit,
-        upperLimit: tol.upperLimit,
-        actualValue: p.actualValue,
-        unit: p.unit,
-        status: tol.status,
-        x: p.x,
-        y: p.y,
-        leaderStartX: p.leaderStartX,
-        leaderStartY: p.leaderStartY
-      };
-    });
-
-    setBalloons(initialBalloons);
+    setBalloons([]);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -151,8 +154,9 @@ export const PrototypeWorkspace: React.FC = () => {
     if (!file) return;
 
     const fileExt = file.name.split('.').pop()?.toLowerCase();
-    setDrawingName(file.name.replace(/\.[^/.]+$/, ''));
-    setPartNumber(file.name.slice(0, 12).toUpperCase());
+    const cleanName = file.name.replace(/\.[^/.]+$/, '');
+    setDrawingName(cleanName);
+    setPartNumber(cleanName.slice(0, 14).toUpperCase());
 
     if (fileExt === 'pdf') {
       const reader = new FileReader();
@@ -174,7 +178,7 @@ export const PrototypeWorkspace: React.FC = () => {
             setBalloons([]);
           }
         } catch (err) {
-          alert('Failed to parse PDF drawing');
+          alert('Unable to render PDF drawing.');
         }
       };
       reader.readAsArrayBuffer(file);
@@ -187,7 +191,7 @@ export const PrototypeWorkspace: React.FC = () => {
     }
   };
 
-  // Render Background Drawing Image / SVG
+  // Render Background Blueprint onto Canvas
   useEffect(() => {
     if (drawingType === 'PDF') return;
     if (!drawingSrc || !bgCanvasRef.current) return;
@@ -197,20 +201,20 @@ export const PrototypeWorkspace: React.FC = () => {
     img.onload = () => {
       const canvas = bgCanvasRef.current;
       if (!canvas) return;
-      const targetW = img.width || 1000;
-      const targetH = img.height || 700;
-      canvas.width = targetW;
-      canvas.height = targetH;
+      const w = img.width || 1000;
+      const h = img.height || 700;
+      canvas.width = w;
+      canvas.height = h;
       const ctx = canvas.getContext('2d');
       if (ctx) {
-        ctx.clearRect(0, 0, targetW, targetH);
-        ctx.drawImage(img, 0, 0, targetW, targetH);
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
       }
-      setCanvasDim({ width: targetW, height: targetH });
+      setCanvasDim({ width: w, height: h });
     };
   }, [drawingSrc, drawingType]);
 
-  // Setup Fabric.js Overlay Canvas
+  // Setup Fabric.js Vector Overlay
   useEffect(() => {
     if (!overlayCanvasRef.current) return;
 
@@ -229,7 +233,6 @@ export const PrototypeWorkspace: React.FC = () => {
     };
   }, [canvasDim]);
 
-  // Update cursor and selection mode when active tool changes
   useEffect(() => {
     const fc = fabricCanvasRef.current;
     if (!fc) return;
@@ -241,7 +244,7 @@ export const PrototypeWorkspace: React.FC = () => {
 
   // Collision Avoidance: Find Nearest Free Position
   const findCollisionFreePosition = (targetX: number, targetY: number, existing: PrototypeBalloon[]) => {
-    const radius = 22;
+    const radius = 20;
     let finalX = targetX;
     let finalY = targetY;
     let attempts = 0;
@@ -263,7 +266,7 @@ export const PrototypeWorkspace: React.FC = () => {
 
       attempts++;
       angle += Math.PI / 4;
-      const distance = radius * 2.5 * Math.ceil(attempts / 8);
+      const distance = radius * 2.4 * Math.ceil(attempts / 8);
       finalX = targetX + Math.cos(angle) * distance;
       finalY = targetY + Math.sin(angle) * distance;
 
@@ -274,7 +277,7 @@ export const PrototypeWorkspace: React.FC = () => {
     return { x: targetX, y: targetY };
   };
 
-  // Handle Canvas Click to add Balloon
+  // Handle Canvas Click to add Balloon -> opens Configure Dimension Dialog Box
   useEffect(() => {
     const fc = fabricCanvasRef.current;
     if (!fc) return;
@@ -288,31 +291,29 @@ export const PrototypeWorkspace: React.FC = () => {
 
       const freePos = findCollisionFreePosition(clickedX, clickedY, balloons);
 
-      // Determine next sequential balloon number
+      // Auto sequential balloon ID calculation (Strictly sequential, no manual change)
       const nextNum = balloons.length > 0 ? Math.max(...balloons.map((b) => b.balloonNumber)) + 1 : 1;
 
-      const newBalloon: PrototypeBalloon = {
-        id: `balloon-${nextNum}-${Date.now()}`,
+      setModalData({
+        id: `dim-b-${nextNum}-${Date.now()}`,
         balloonNumber: nextNum,
         dimensionName: `Dimension #${nextNum}`,
-        nominalValue: 25.0,
-        upperTolerance: 0.1,
-        lowerTolerance: -0.1,
-        lowerLimit: 24.9,
-        upperLimit: 25.1,
-        actualValue: null,
         unit: 'mm',
-        status: 'PENDING',
-        x: freePos.x / canvasDim.width,
-        y: freePos.y / canvasDim.height,
+        nominalValue: '25.00',
+        upperTolerance: '0.10',
+        lowerTolerance: '-0.10',
+        warningThresholdPercent: 10,
+        observationCount: 1,
+        observations: [''],
+        remarks: '',
+        isNew: true,
+        normX: freePos.x / canvasDim.width,
+        normY: freePos.y / canvasDim.height,
         leaderStartX: clickedX / canvasDim.width,
         leaderStartY: clickedY / canvasDim.height
-      };
+      });
 
-      setBalloons((prev) => [...prev, newBalloon]);
-      setSelectedBalloonId(newBalloon.id);
-      setModalBalloon(newBalloon);
-      setEditModalOpen(true);
+      setConfigModalOpen(true);
     };
 
     fc.on('mouse:down', handleMouseDown);
@@ -321,7 +322,92 @@ export const PrototypeWorkspace: React.FC = () => {
     };
   }, [activeTool, balloons, canvasDim]);
 
-  // Render Balloons onto Canvas Overlay
+  // Open Configure Dimension Dialog for Existing Balloon
+  const openEditModalForBalloon = (b: PrototypeBalloon) => {
+    setModalData({
+      id: b.id,
+      balloonNumber: b.balloonNumber,
+      dimensionName: b.dimensionName,
+      unit: b.unit || 'mm',
+      nominalValue: b.nominalValue !== null ? String(b.nominalValue) : '',
+      upperTolerance: b.upperTolerance !== null ? String(b.upperTolerance) : '0.00',
+      lowerTolerance: b.lowerTolerance !== null ? String(b.lowerTolerance) : '0.00',
+      warningThresholdPercent: b.warningThresholdPercent || 10,
+      observationCount: b.observationCount || 1,
+      observations: b.observations.map((o) => (o !== null && o !== undefined ? String(o) : '')),
+      remarks: b.remarks || '',
+      isNew: false,
+      normX: b.x,
+      normY: b.y,
+      leaderStartX: b.leaderStartX,
+      leaderStartY: b.leaderStartY
+    });
+    setConfigModalOpen(true);
+  };
+
+  // Save Configured Dimension from Dialog Box
+  const handleSaveModalDimension = () => {
+    const nom = parseFloat(modalData.nominalValue);
+    const upperTol = parseFloat(modalData.upperTolerance);
+    const lowerTol = parseFloat(modalData.lowerTolerance);
+
+    if (isNaN(nom)) {
+      alert('Please enter a valid numeric Drawing Dimension (Nominal).');
+      return;
+    }
+
+    const obsCount = Math.max(1, modalData.observationCount);
+    const parsedObservations: (number | null)[] = [];
+    for (let i = 0; i < obsCount; i++) {
+      const raw = modalData.observations[i];
+      if (raw !== undefined && raw !== '' && !isNaN(parseFloat(raw))) {
+        parsedObservations.push(parseFloat(raw));
+      } else {
+        parsedObservations.push(null);
+      }
+    }
+
+    // Evaluate Tolerance Math
+    const tolResult: ToleranceResult = evaluateMultiReadings(
+      nom,
+      isNaN(upperTol) ? 0 : upperTol,
+      isNaN(lowerTol) ? 0 : lowerTol,
+      parsedObservations,
+      modalData.warningThresholdPercent
+    );
+
+    const balloonItem: PrototypeBalloon = {
+      id: modalData.id,
+      balloonNumber: modalData.balloonNumber, // sequential locked ID
+      dimensionName: modalData.dimensionName || `Dimension #${modalData.balloonNumber}`,
+      unit: modalData.unit,
+      nominalValue: nom,
+      upperTolerance: isNaN(upperTol) ? 0 : upperTol,
+      lowerTolerance: isNaN(lowerTol) ? 0 : lowerTol,
+      warningThresholdPercent: modalData.warningThresholdPercent,
+      observationCount: obsCount,
+      observations: parsedObservations,
+      lowerLimit: tolResult.lowerLimit,
+      upperLimit: tolResult.upperLimit,
+      status: tolResult.status,
+      remarks: modalData.remarks,
+      x: modalData.normX,
+      y: modalData.normY,
+      leaderStartX: modalData.leaderStartX,
+      leaderStartY: modalData.leaderStartY
+    };
+
+    if (modalData.isNew) {
+      setBalloons((prev) => [...prev, balloonItem]);
+      setSelectedBalloonId(balloonItem.id);
+    } else {
+      setBalloons((prev) => prev.map((b) => (b.id === balloonItem.id ? balloonItem : b)));
+    }
+
+    setConfigModalOpen(false);
+  };
+
+  // Render Balloons onto Fabric.js Canvas
   useEffect(() => {
     const fc = fabricCanvasRef.current;
     if (!fc) return;
@@ -332,7 +418,7 @@ export const PrototypeWorkspace: React.FC = () => {
       const px = b.x * canvasDim.width;
       const py = b.y * canvasDim.height;
       const isSelected = b.id === selectedBalloonId;
-      const colorScheme = STATUS_COLORS[b.status] || STATUS_COLORS.PENDING;
+      const statusStyle = STATUS_STYLES[b.status] || STATUS_STYLES.PENDING;
 
       let leaderLine: fabric.Line | null = null;
       let targetDot: fabric.Circle | null = null;
@@ -348,19 +434,19 @@ export const PrototypeWorkspace: React.FC = () => {
         targetDot = new fabric.Circle({
           left: lx,
           top: ly,
-          radius: 3.5,
-          fill: colorScheme.border,
+          radius: 3,
+          fill: statusStyle.border,
           originX: 'center',
           originY: 'center',
           selectable: false,
           evented: false
         });
 
-        // Stretchable Leader Line
+        // Stretchable Clean Leader Line
         leaderLine = new fabric.Line([lx, ly, px, py], {
-          stroke: colorScheme.border,
-          strokeWidth: 2,
-          strokeDashArray: [4, 4],
+          stroke: statusStyle.border,
+          strokeWidth: 1.5,
+          strokeDashArray: [3, 3],
           selectable: false,
           evented: false
         });
@@ -369,23 +455,22 @@ export const PrototypeWorkspace: React.FC = () => {
         fc.add(leaderLine);
       }
 
-      // Circle Balloon
+      // 2D Clean CAD Balloon Circle
       const circle = new fabric.Circle({
-        radius: 17,
-        fill: colorScheme.fill,
-        stroke: isSelected ? '#2563EB' : colorScheme.border,
-        strokeWidth: isSelected ? 3.5 : 2.5,
+        radius: 15,
+        fill: statusStyle.fill,
+        stroke: isSelected ? '#1A73E8' : statusStyle.border,
+        strokeWidth: isSelected ? 2.5 : 1.5,
         originX: 'center',
-        originY: 'center',
-        shadow: isSelected ? new fabric.Shadow({ color: 'rgba(37, 99, 235, 0.6)', blur: 14 }) : undefined
+        originY: 'center'
       });
 
       // Balloon Number Text
       const text = new fabric.Text(String(b.balloonNumber), {
-        fontSize: String(b.balloonNumber).length > 2 ? 11 : 13,
+        fontSize: String(b.balloonNumber).length > 2 ? 10 : 12,
         fontWeight: 'bold',
-        fill: colorScheme.text,
-        fontFamily: 'Inter, Arial, sans-serif',
+        fill: statusStyle.text,
+        fontFamily: 'Arial, sans-serif',
         originX: 'center',
         originY: 'center'
       });
@@ -406,8 +491,7 @@ export const PrototypeWorkspace: React.FC = () => {
       });
 
       balloonGroup.on('mousedblclick', () => {
-        setModalBalloon(b);
-        setEditModalOpen(true);
+        openEditModalForBalloon(b);
       });
 
       balloonGroup.on('moving', () => {
@@ -437,29 +521,28 @@ export const PrototypeWorkspace: React.FC = () => {
     fc.renderAll();
   }, [balloons, selectedBalloonId, activeTool, canvasDim]);
 
-  // Update a single balloon's properties and re-calculate tolerance status
-  const updateBalloonData = (
-    id: string,
-    updates: Partial<PrototypeBalloon>
-  ) => {
+  // Inline Quick Reading update from the table
+  const handleQuickObservationChange = (balloonId: string, obsIndex: number, rawVal: string) => {
     setBalloons((prev) =>
       prev.map((b) => {
-        if (b.id !== id) return b;
-        const updated = { ...b, ...updates };
+        if (b.id !== balloonId) return b;
+        const updatedObs = [...b.observations];
+        updatedObs[obsIndex] = rawVal === '' ? null : parseFloat(rawVal);
 
-        // Run tolerance validation
-        const tolResult: ToleranceResult = calculateTolerance(
-          updated.nominalValue,
-          updated.upperTolerance,
-          updated.lowerTolerance,
-          updated.actualValue
+        const tolResult = evaluateMultiReadings(
+          b.nominalValue,
+          b.upperTolerance,
+          b.lowerTolerance,
+          updatedObs,
+          b.warningThresholdPercent
         );
 
         return {
-          ...updated,
+          ...b,
+          observations: updatedObs,
+          status: tolResult.status,
           lowerLimit: tolResult.lowerLimit,
-          upperLimit: tolResult.upperLimit,
-          status: tolResult.status
+          upperLimit: tolResult.upperLimit
         };
       })
     );
@@ -472,7 +555,7 @@ export const PrototypeWorkspace: React.FC = () => {
 
   const handleExport = async () => {
     if (balloons.length === 0) {
-      alert('Please add at least one dimension balloon before exporting.');
+      alert('Please place at least one dimension balloon before exporting.');
       return;
     }
 
@@ -484,7 +567,9 @@ export const PrototypeWorkspace: React.FC = () => {
       lowerTolerance: b.lowerTolerance,
       lowerLimit: b.lowerLimit,
       upperLimit: b.upperLimit,
-      actualValue: b.actualValue,
+      observationCount: b.observationCount,
+      observations: b.observations,
+      actualValue: b.observations[0] ?? null,
       unit: b.unit,
       status: b.status,
       remarks: b.remarks
@@ -492,12 +577,12 @@ export const PrototypeWorkspace: React.FC = () => {
 
     await exportInspectionToExcel(
       {
-        companyName: 'Valmet Quality Assurance Platform',
+        companyName: 'Valmet Corporation',
         partName: drawingName,
         partNumber: partNumber,
         drawingRef: drawingName,
         revision: revision,
-        inspectorName: 'Shop Floor QA Inspector',
+        inspectorName: 'QA Inspection Engineer',
         inspectionDate: new Date().toLocaleDateString()
       },
       exportItems
@@ -505,38 +590,30 @@ export const PrototypeWorkspace: React.FC = () => {
   };
 
   // Summary Metrics Counts
-  const passCount = balloons.filter((b) => b.status === 'PASS').length;
-  const checkCount = balloons.filter((b) => b.status === 'CHECK').length;
-  const failCount = balloons.filter((b) => b.status === 'FAIL').length;
-  const pendingCount = balloons.filter((b) => b.status === 'PENDING').length;
+  const okCount = balloons.filter((b) => b.status === 'OK').length;
+  const checkCount = balloons.filter((b) => b.status === 'TO CHECK').length;
+  const failCount = balloons.filter((b) => b.status === 'NOT ACCEPTABLE').length;
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 overflow-hidden font-sans select-none">
-      {/* 1. Header Toolbar Banner */}
-      <header className="h-16 px-6 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between shrink-0 shadow-sm z-20">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center text-white shadow-md shadow-blue-500/20">
-              <Layers className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="font-bold text-base text-slate-900 dark:text-white tracking-tight">
-                  Valmet Dimension Ballooning & Inspection Tool
-                </h1>
-                <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300 border border-blue-200 dark:border-blue-800 font-mono">
-                  Live Prototype
-                </span>
-              </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400 font-mono">
-                Drawing: <strong className="text-slate-800 dark:text-slate-200">{drawingName}</strong> ({partNumber} - {revision})
-              </p>
-            </div>
+    <div className="flex flex-col h-screen w-screen bg-slate-50 text-slate-900 overflow-hidden font-sans text-xs select-none">
+      {/* 1. Header: Clean Technical Title & Actions */}
+      <header className="h-14 px-5 bg-white border-b border-slate-200 flex items-center justify-between shrink-0 shadow-sm z-20">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded bg-slate-800 flex items-center justify-center text-white font-bold text-sm">
+            V
+          </div>
+          <div>
+            <h1 className="font-bold text-sm text-slate-900 tracking-tight">
+              Drawing Dimension Ballooning & Inspection Tool
+            </h1>
+            <p className="text-[11px] text-slate-500 font-mono">
+              Drawing: <span className="font-semibold text-slate-700">{drawingName}</span> | Part: <span className="font-semibold text-slate-700">{partNumber}</span> ({revision})
+            </p>
           </div>
         </div>
 
-        {/* Top Actions */}
-        <div className="flex items-center gap-3">
+        {/* Action Buttons */}
+        <div className="flex items-center gap-2.5">
           <input
             type="file"
             ref={fileInputRef}
@@ -547,43 +624,35 @@ export const PrototypeWorkspace: React.FC = () => {
 
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-all shadow-sm"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 transition-colors shadow-sm"
           >
-            <Upload className="w-4 h-4 text-blue-500" />
-            <span>Upload PDF / Drawing</span>
-          </button>
-
-          <button
-            onClick={loadSampleDrawing}
-            className="flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-all shadow-sm"
-          >
-            <Sparkles className="w-4 h-4 text-amber-500" />
-            <span>Load Valmet Sample</span>
+            <Upload className="w-3.5 h-3.5 text-slate-600" />
+            <span>Upload Drawing (PDF / Image)</span>
           </button>
 
           <button
             onClick={handleExport}
-            className="flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-600/20 transition-all"
+            className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded bg-emerald-700 hover:bg-emerald-800 text-white transition-colors shadow-sm"
           >
-            <FileSpreadsheet className="w-4 h-4" />
-            <span>Export Inspection Excel (.xlsx)</span>
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>Export Excel (.xlsx)</span>
           </button>
         </div>
       </header>
 
-      {/* 2. Main Split View: Canvas on Left, Inspection Table on Right */}
+      {/* 2. Main Work Area: 2D Engineering Canvas on Left, Inspection Table on Right */}
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
-        {/* Left Side: Interactive Engineering Canvas */}
-        <div className="flex-1 flex flex-col bg-slate-200 dark:bg-slate-950 overflow-hidden relative border-r border-slate-300 dark:border-slate-800">
-          {/* Floating Canvas Action Bar */}
-          <div className="absolute top-4 left-4 z-10 flex items-center gap-2 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md p-1.5 rounded-2xl border border-slate-300 dark:border-slate-700 shadow-xl">
-            {/* Tool Mode Buttons */}
+        {/* Left Side: 2D Engineering Canvas */}
+        <div className="flex-1 flex flex-col bg-slate-100 overflow-hidden relative border-r border-slate-300">
+          {/* Canvas Floating Toolbar */}
+          <div className="absolute top-3 left-3 z-10 flex items-center gap-1 bg-white/95 backdrop-blur-sm p-1 rounded border border-slate-300 shadow-sm">
+            {/* Mode Selectors */}
             <button
               onClick={() => setActiveTool('BALLOON')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
                 activeTool === 'BALLOON'
-                  ? 'bg-blue-600 text-white shadow-md shadow-blue-500/30'
-                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  ? 'bg-slate-900 text-white'
+                  : 'text-slate-700 hover:bg-slate-100'
               }`}
               title="Click on drawing to place dimension balloon"
             >
@@ -593,148 +662,147 @@ export const PrototypeWorkspace: React.FC = () => {
 
             <button
               onClick={() => setActiveTool('SELECT')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
                 activeTool === 'SELECT'
-                  ? 'bg-blue-600 text-white shadow-md shadow-blue-500/30'
-                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  ? 'bg-slate-900 text-white'
+                  : 'text-slate-700 hover:bg-slate-100'
               }`}
-              title="Select & drag balloons to stretch leader lines"
+              title="Select and reposition balloons with leader line"
             >
               <MousePointer className="w-3.5 h-3.5" />
-              <span>Select & Move</span>
+              <span>Select & Drag</span>
             </button>
 
-            <div className="h-4 w-px bg-slate-300 dark:bg-slate-700 mx-1" />
+            <div className="h-4 w-px bg-slate-200 mx-1" />
 
-            {/* Zoom controls */}
+            {/* Zoom Controls */}
             <button
-              onClick={() => setScale((s) => Math.min(2.5, s + 0.15))}
-              className="p-1.5 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg"
+              onClick={() => setZoomScale((s) => Math.min(2.5, s + 0.15))}
+              className="p-1 text-slate-700 hover:bg-slate-100 rounded"
               title="Zoom In"
             >
-              <ZoomIn className="w-4 h-4" />
+              <ZoomIn className="w-3.5 h-3.5" />
             </button>
 
             <button
-              onClick={() => setScale((s) => Math.max(0.4, s - 0.15))}
-              className="p-1.5 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg"
+              onClick={() => setZoomScale((s) => Math.max(0.4, s - 0.15))}
+              className="p-1 text-slate-700 hover:bg-slate-100 rounded"
               title="Zoom Out"
             >
-              <ZoomOut className="w-4 h-4" />
+              <ZoomOut className="w-3.5 h-3.5" />
             </button>
 
             <button
-              onClick={() => setScale(1.0)}
-              className="p-1.5 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-xs font-mono font-bold"
-              title="Reset Zoom"
+              onClick={() => setZoomScale(1.0)}
+              className="p-1 text-slate-700 hover:bg-slate-100 rounded"
+              title="Reset Zoom (100%)"
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
 
-            <span className="text-[11px] font-mono font-bold text-slate-500 dark:text-slate-400 px-2">
-              {Math.round(scale * 100)}%
+            <span className="text-[10px] font-mono text-slate-500 px-1.5">
+              {Math.round(zoomScale * 100)}%
             </span>
           </div>
 
-          {/* Canvas Viewport Scroll Area */}
-          <div className="flex-1 overflow-auto p-8 flex items-center justify-center relative">
+          {/* 2D Blueprint Canvas Viewport */}
+          <div className="flex-1 overflow-auto p-6 flex items-center justify-center relative">
             <div
-              className="relative inline-block bg-white shadow-2xl rounded border border-slate-300 dark:border-slate-800 transition-transform origin-center"
+              className="relative inline-block bg-white shadow border border-slate-300 transition-transform origin-center"
               style={{
-                transform: `scale(${scale})`,
+                transform: `scale(${zoomScale})`,
                 width: `${canvasDim.width}px`,
                 height: `${canvasDim.height}px`
               }}
             >
-              {/* Background Drawing Raster */}
+              {/* Drawing Background Canvas */}
               <canvas ref={bgCanvasRef} className="block absolute top-0 left-0" />
 
-              {/* Interactive Vector Balloon Fabric Overlay */}
+              {/* Fabric.js Vector Balloon Overlay */}
               <div className="absolute top-0 left-0 pointer-events-auto">
                 <canvas ref={overlayCanvasRef} />
               </div>
             </div>
           </div>
 
-          {/* Quick Helper Footer */}
-          <div className="p-3 bg-white/70 dark:bg-slate-900/70 border-t border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 flex items-center justify-between px-6">
-            <div className="flex items-center gap-4">
+          {/* Canvas Footer Legend */}
+          <div className="h-8 px-4 bg-white border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-600">
+            <div className="flex items-center gap-4 font-medium">
               <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></span>
-                <span>Green = OK (In Spec)</span>
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 inline-block"></span>
+                <span>OK (Within Tolerance)</span>
               </span>
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span>
-                <span>Yellow = To Check (10% Boundary)</span>
+                <span>To Check (Warning Boundary)</span>
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block"></span>
-                <span>Red = Out of Tolerance</span>
+                <span className="w-2.5 h-2.5 rounded-full bg-red-600 inline-block"></span>
+                <span>Not Acceptable (Out of Tolerance)</span>
               </span>
             </div>
-            <span className="text-[11px] font-mono text-slate-500">
-              Tip: Drag balloon away to pull leader line without covering dimension text
+
+            <span className="font-mono text-slate-400">
+              Double-click balloon on canvas to edit configuration
             </span>
           </div>
         </div>
 
-        {/* Right Side: Inspection Characteristic Table */}
-        <div className="w-full lg:w-[540px] xl:w-[600px] flex flex-col bg-white dark:bg-slate-900 shrink-0 overflow-hidden">
-          {/* Status Metrics Bar */}
-          <div className="p-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 flex items-center justify-between gap-2">
+        {/* Right Side: Inspection Characteristics Table */}
+        <div className="w-full lg:w-[580px] xl:w-[640px] flex flex-col bg-white shrink-0 overflow-hidden">
+          {/* Table Header & Metrics Summary */}
+          <div className="p-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
             <div>
-              <h3 className="font-bold text-sm text-slate-900 dark:text-white">
-                Inspection Log & Tolerance Engine
-              </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Live physical reading evaluation
+              <h2 className="font-bold text-xs text-slate-800 uppercase tracking-wider font-mono">
+                Dimensional Inspection Characteristics
+              </h2>
+              <p className="text-[11px] text-slate-500">
+                Total: <strong className="text-slate-800 font-mono">{balloons.length}</strong> Dimensions
               </p>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-mono font-bold px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 dark:border-emerald-800">
-                {passCount} OK
+            <div className="flex items-center gap-2 font-mono text-[11px]">
+              <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-300 font-semibold">
+                {okCount} OK
               </span>
-              <span className="text-xs font-mono font-bold px-2 py-1 rounded-lg bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/60 dark:text-amber-400 dark:border-amber-800">
+              <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-300 font-semibold">
                 {checkCount} Check
               </span>
-              <span className="text-xs font-mono font-bold px-2 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-950/60 dark:text-rose-400 dark:border-rose-800">
-                {failCount} Fail
+              <span className="px-2 py-0.5 rounded bg-red-50 text-red-800 border border-red-300 font-semibold">
+                {failCount} Reject
               </span>
             </div>
           </div>
 
-          {/* Table Area */}
+          {/* Table Data Rows */}
           <div className="flex-1 overflow-auto">
             {balloons.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center p-8 text-center text-slate-400 space-y-3">
-                <Sliders className="w-10 h-10 text-slate-400 dark:text-slate-600" />
-                <h4 className="text-sm font-bold text-slate-700 dark:text-slate-300">
-                  No Dimension Balloons Placed
-                </h4>
-                <p className="text-xs max-w-xs text-slate-500">
-                  Click <strong>"Add Balloon"</strong> on the top left, then click any dimension on the engineering drawing.
+              <div className="h-full flex flex-col items-center justify-center p-6 text-center text-slate-400 space-y-2">
+                <Sliders className="w-8 h-8 text-slate-300" />
+                <p className="text-xs font-semibold text-slate-600">No Dimension Balloons Added</p>
+                <p className="text-[11px] max-w-xs text-slate-400">
+                  Select <strong>"Add Balloon"</strong> and click any measurement on the drawing to configure nominal dimensions and tolerance limits.
                 </p>
               </div>
             ) : (
-              <table className="w-full text-left text-xs">
-                <thead className="sticky top-0 z-10 bg-slate-100 dark:bg-slate-950 text-slate-800 dark:text-slate-200 font-bold border-b border-slate-200 dark:border-slate-800 font-mono text-[11px]">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead className="sticky top-0 z-10 bg-slate-100 text-slate-700 font-bold border-b border-slate-200 font-mono text-[11px]">
                   <tr>
-                    <th className="py-2.5 px-3 text-center w-10">#</th>
-                    <th className="py-2.5 px-3">Dimension</th>
-                    <th className="py-2.5 px-3 text-right">Nominal</th>
-                    <th className="py-2.5 px-3 text-right">Tol</th>
-                    <th className="py-2.5 px-3 text-right">Limits</th>
-                    <th className="py-2.5 px-3 text-center min-w-[110px]">Actual Reading</th>
-                    <th className="py-2.5 px-3 text-center">Status</th>
-                    <th className="py-2.5 px-2 text-center w-8"></th>
+                    <th className="py-2 px-2 text-center w-8">#</th>
+                    <th className="py-2 px-2.5">Parameter</th>
+                    <th className="py-2 px-2 text-right">Nominal</th>
+                    <th className="py-2 px-2 text-right">Tolerance</th>
+                    <th className="py-2 px-2 text-right">Limits</th>
+                    <th className="py-2 px-2 text-center min-w-[130px]">Actual Reading(s)</th>
+                    <th className="py-2 px-2 text-center">Status</th>
+                    <th className="py-2 px-1 text-center w-12">Actions</th>
                   </tr>
                 </thead>
 
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-800 font-mono">
+                <tbody className="divide-y divide-slate-200 font-mono text-[11px]">
                   {balloons.map((b) => {
                     const isSelected = b.id === selectedBalloonId;
-                    const statusInfo = STATUS_COLORS[b.status] || STATUS_COLORS.PENDING;
+                    const styleInfo = STATUS_STYLES[b.status] || STATUS_STYLES.PENDING;
 
                     return (
                       <tr
@@ -742,82 +810,103 @@ export const PrototypeWorkspace: React.FC = () => {
                         onClick={() => setSelectedBalloonId(b.id)}
                         className={`cursor-pointer transition-colors ${
                           isSelected
-                            ? 'bg-blue-50 dark:bg-blue-950/40 border-l-4 border-blue-500'
-                            : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                            ? 'bg-blue-50/80 border-l-2 border-blue-600'
+                            : 'hover:bg-slate-50'
                         }`}
                       >
-                        {/* Balloon Badge */}
-                        <td className="py-2.5 px-3 text-center">
+                        {/* Balloon Number Badge */}
+                        <td className="py-2 px-2 text-center">
                           <span
-                            className="w-6 h-6 rounded-full inline-flex items-center justify-center font-bold text-white text-xs shadow-sm"
-                            style={{ backgroundColor: statusInfo.border }}
+                            className="w-5 h-5 rounded-full inline-flex items-center justify-center font-bold text-white text-[10px]"
+                            style={{ backgroundColor: styleInfo.border }}
                           >
                             {b.balloonNumber}
                           </span>
                         </td>
 
-                        {/* Characteristic Name */}
-                        <td className="py-2.5 px-3 font-sans font-medium text-slate-800 dark:text-slate-200">
+                        {/* Parameter Name */}
+                        <td className="py-2 px-2.5 font-sans font-medium text-slate-800">
                           {b.dimensionName}
                         </td>
 
-                        {/* Nominal */}
-                        <td className="py-2.5 px-3 text-right font-extrabold text-slate-900 dark:text-white">
-                          {b.nominalValue !== null ? b.nominalValue.toFixed(2) : '-'}
+                        {/* Nominal Drawing Dim */}
+                        <td className="py-2 px-2 text-right font-bold text-slate-900">
+                          {b.nominalValue !== null ? b.nominalValue.toFixed(3) : '-'}
                         </td>
 
                         {/* Tolerance */}
-                        <td className="py-2.5 px-3 text-right text-[11px]">
-                          <span className="text-emerald-600 dark:text-emerald-400 font-bold block">
-                            +{b.upperTolerance?.toFixed(2) ?? '0.00'}
+                        <td className="py-2 px-2 text-right text-[10px]">
+                          <span className="text-emerald-700 font-medium block">
+                            +{b.upperTolerance?.toFixed(3) ?? '0.000'}
                           </span>
-                          <span className="text-rose-600 dark:text-rose-400 font-bold block">
-                            {b.lowerTolerance?.toFixed(2) ?? '0.00'}
+                          <span className="text-red-700 font-medium block">
+                            {b.lowerTolerance?.toFixed(3) ?? '0.000'}
                           </span>
                         </td>
 
                         {/* Lower / Upper Limits */}
-                        <td className="py-2.5 px-3 text-right text-[10px] text-slate-500 dark:text-slate-400">
-                          <div>L: {b.lowerLimit?.toFixed(2) ?? '-'}</div>
-                          <div>U: {b.upperLimit?.toFixed(2) ?? '-'}</div>
+                        <td className="py-2 px-2 text-right text-[10px] text-slate-500">
+                          <div>L: {b.lowerLimit?.toFixed(3) ?? '-'}</div>
+                          <div>U: {b.upperLimit?.toFixed(3) ?? '-'}</div>
                         </td>
 
-                        {/* Actual Physical Input */}
-                        <td className="py-2 px-3 text-center">
-                          <input
-                            type="number"
-                            step="any"
-                            value={b.actualValue !== null && b.actualValue !== undefined ? b.actualValue : ''}
-                            onChange={(e) => {
-                              const val = e.target.value === '' ? null : parseFloat(e.target.value);
-                              updateBalloonData(b.id, { actualValue: isNaN(val as number) ? null : val });
-                            }}
-                            placeholder="Reading..."
-                            className="w-24 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-2 py-1 text-xs text-center font-bold text-slate-900 dark:text-white focus:outline-none focus:border-blue-500 shadow-sm"
-                          />
+                        {/* Actual Physical Readings (Single or Multiple) */}
+                        <td className="py-1.5 px-2 text-center">
+                          <div className="flex items-center justify-center gap-1">
+                            {Array.from({ length: b.observationCount || 1 }).map((_, obsIdx) => {
+                              const val = b.observations[obsIdx];
+                              return (
+                                <input
+                                  key={obsIdx}
+                                  type="number"
+                                  step="any"
+                                  value={val !== null && val !== undefined ? val : ''}
+                                  onChange={(e) =>
+                                    handleQuickObservationChange(b.id, obsIdx, e.target.value)
+                                  }
+                                  placeholder={`Obs ${obsIdx + 1}`}
+                                  className="w-16 bg-white border border-slate-300 rounded px-1.5 py-0.5 text-center font-bold text-slate-900 focus:outline-none focus:border-blue-600 text-[11px]"
+                                  title={`Observation ${obsIdx + 1}`}
+                                />
+                              );
+                            })}
+                          </div>
                         </td>
 
-                        {/* Status Badge */}
-                        <td className="py-2.5 px-3 text-center">
+                        {/* Status Result Badge */}
+                        <td className="py-2 px-2 text-center">
                           <span
-                            className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold border ${statusInfo.badgeBg}`}
+                            className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-bold border ${styleInfo.badge}`}
                           >
-                            {statusInfo.label}
+                            {styleInfo.label}
                           </span>
                         </td>
 
-                        {/* Delete Action */}
-                        <td className="py-2.5 px-2 text-center">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deleteBalloon(b.id);
-                            }}
-                            className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
-                            title="Delete Balloon"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                        {/* Actions */}
+                        <td className="py-2 px-1 text-center">
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openEditModalForBalloon(b);
+                              }}
+                              className="p-1 text-slate-500 hover:text-blue-700 rounded hover:bg-slate-100"
+                              title="Configure Dimension"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteBalloon(b.id);
+                              }}
+                              className="p-1 text-slate-400 hover:text-red-700 rounded hover:bg-slate-100"
+                              title="Delete Balloon"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -826,165 +915,203 @@ export const PrototypeWorkspace: React.FC = () => {
               </table>
             )}
           </div>
-
-          {/* Quick Preload Actions */}
-          <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 flex items-center justify-between text-xs">
-            <span className="font-mono text-slate-500">
-              Total: <strong>{balloons.length}</strong> Dimensions
-            </span>
-
-            <button
-              onClick={() => {
-                if (balloons.length === 0) return;
-                // Pre-fill realistic actuals for quick demonstration
-                setBalloons((prev) =>
-                  prev.map((b, idx) => {
-                    const demoVals = [38.42, 41.18, 112.24, 91.98, 64.95];
-                    const val = demoVals[idx % demoVals.length];
-                    const tol = calculateTolerance(b.nominalValue, b.upperTolerance, b.lowerTolerance, val);
-                    return {
-                      ...b,
-                      actualValue: val,
-                      status: tol.status,
-                      lowerLimit: tol.lowerLimit,
-                      upperLimit: tol.upperLimit
-                    };
-                  })
-                );
-              }}
-              className="text-blue-600 dark:text-cyan-400 font-semibold hover:underline flex items-center gap-1"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Simulate Physical Readings</span>
-            </button>
-          </div>
         </div>
       </div>
 
-      {/* 3. Fast Edit Modal for Dimension Nominal & Tolerance Limits */}
-      {editModalOpen && modalBalloon && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm">
-          <div className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
-              <h3 className="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
-                <span className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs inline-flex items-center justify-center font-bold">
-                  {modalBalloon.balloonNumber}
+      {/* 3. Configure Dimension Dialog Box Modal */}
+      {configModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-[1px]">
+          <div className="bg-white border border-slate-300 rounded-lg shadow-xl max-w-md w-full overflow-hidden text-xs">
+            {/* Modal Header */}
+            <div className="px-5 py-3 bg-slate-800 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 bg-blue-600 text-white rounded font-mono font-bold text-xs">
+                  Balloon #{modalData.balloonNumber}
                 </span>
-                Configure Dimension Balloon
-              </h3>
+                <h3 className="font-bold text-sm">Configure Dimension</h3>
+              </div>
               <button
-                onClick={() => setEditModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 dark:hover:text-white text-sm"
+                onClick={() => setConfigModalOpen(false)}
+                className="text-slate-300 hover:text-white"
               >
-                ✕
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="space-y-3 text-xs">
+            {/* Form Fields */}
+            <div className="p-5 space-y-3.5">
+              {/* Parameter / Feature Name */}
               <div>
-                <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">
+                <label className="block text-slate-700 font-semibold mb-1">
                   Dimension Feature Name
                 </label>
                 <input
                   type="text"
-                  value={modalBalloon.dimensionName}
-                  onChange={(e) => setModalBalloon({ ...modalBalloon, dimensionName: e.target.value })}
-                  placeholder="e.g. Bore Diameter / Center Distance"
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-900 dark:text-white font-medium focus:outline-none focus:border-blue-500"
+                  value={modalData.dimensionName}
+                  onChange={(e) => setModalData({ ...modalData, dimensionName: e.target.value })}
+                  placeholder="e.g. Hole Center Distance, Flange Outer Diameter, Slot Width"
+                  className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-slate-900 focus:outline-none focus:border-blue-600 text-xs"
                 />
               </div>
 
+              {/* Drawing Dimension (Nominal) & Unit */}
               <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">
-                    Nominal (mm)
+                <div className="col-span-2">
+                  <label className="block text-slate-700 font-semibold mb-1">
+                    Drawing Dimension (Nominal)
                   </label>
                   <input
                     type="number"
                     step="any"
-                    value={modalBalloon.nominalValue ?? ''}
-                    onChange={(e) =>
-                      setModalBalloon({
-                        ...modalBalloon,
-                        nominalValue: e.target.value === '' ? null : parseFloat(e.target.value)
-                      })
-                    }
-                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-900 dark:text-white font-bold font-mono focus:outline-none focus:border-blue-500"
+                    required
+                    value={modalData.nominalValue}
+                    onChange={(e) => setModalData({ ...modalData, nominalValue: e.target.value })}
+                    placeholder="25.00"
+                    className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 font-mono font-bold text-slate-900 focus:outline-none focus:border-blue-600"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">
-                    + Upper Tol
+                  <label className="block text-slate-700 font-semibold mb-1">
+                    Unit
                   </label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={modalBalloon.upperTolerance ?? ''}
-                    onChange={(e) =>
-                      setModalBalloon({
-                        ...modalBalloon,
-                        upperTolerance: e.target.value === '' ? null : parseFloat(e.target.value)
-                      })
-                    }
-                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-emerald-600 font-bold font-mono focus:outline-none focus:border-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">
-                    - Lower Tol
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={modalBalloon.lowerTolerance ?? ''}
-                    onChange={(e) =>
-                      setModalBalloon({
-                        ...modalBalloon,
-                        lowerTolerance: e.target.value === '' ? null : parseFloat(e.target.value)
-                      })
-                    }
-                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-rose-600 font-bold font-mono focus:outline-none focus:border-blue-500"
-                  />
+                  <select
+                    value={modalData.unit}
+                    onChange={(e) => setModalData({ ...modalData, unit: e.target.value })}
+                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 font-mono text-slate-900 focus:outline-none focus:border-blue-600"
+                  >
+                    <option value="mm">mm</option>
+                    <option value="in">inch</option>
+                    <option value="deg">deg (°)</option>
+                    <option value="rad">rad</option>
+                  </select>
                 </div>
               </div>
 
+              {/* Manual Tolerance Acceptance Level */}
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded space-y-2">
+                <span className="block font-bold text-slate-800 text-[11px] uppercase tracking-wide">
+                  Tolerance & Acceptance Level
+                </span>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-600 text-[11px] mb-0.5">
+                      + Upper Tolerance
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={modalData.upperTolerance}
+                      onChange={(e) => setModalData({ ...modalData, upperTolerance: e.target.value })}
+                      placeholder="+0.10"
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1 text-emerald-800 font-mono font-bold"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-600 text-[11px] mb-0.5">
+                      - Lower Tolerance
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={modalData.lowerTolerance}
+                      onChange={(e) => setModalData({ ...modalData, lowerTolerance: e.target.value })}
+                      placeholder="-0.10"
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1 text-red-800 font-mono font-bold"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-600 text-[11px] mb-0.5">
+                    Acceptance Warning Boundary (% near limit for "To Check")
+                  </label>
+                  <select
+                    value={modalData.warningThresholdPercent}
+                    onChange={(e) =>
+                      setModalData({ ...modalData, warningThresholdPercent: parseInt(e.target.value) || 10 })
+                    }
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1 text-slate-800 font-mono"
+                  >
+                    <option value="5">5% of tolerance range</option>
+                    <option value="10">10% of tolerance range (Standard)</option>
+                    <option value="15">15% of tolerance range</option>
+                    <option value="20">20% of tolerance range</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Number of Dimensions / Observation Readings */}
               <div>
-                <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">
-                  Actual Measured Value (Optional - can be typed anytime)
-                </label>
-                <input
-                  type="number"
-                  step="any"
-                  value={modalBalloon.actualValue ?? ''}
-                  onChange={(e) =>
-                    setModalBalloon({
-                      ...modalBalloon,
-                      actualValue: e.target.value === '' ? null : parseFloat(e.target.value)
-                    })
-                  }
-                  placeholder="Enter physical reading from vernier / CMM..."
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-900 dark:text-white font-bold font-mono focus:outline-none focus:border-blue-500"
-                />
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-slate-700 font-semibold">
+                    Number of Readings / Observations
+                  </label>
+                  <select
+                    value={modalData.observationCount}
+                    onChange={(e) => {
+                      const count = parseInt(e.target.value) || 1;
+                      const current = [...modalData.observations];
+                      while (current.length < count) current.push('');
+                      setModalData({
+                        ...modalData,
+                        observationCount: count,
+                        observations: current.slice(0, count)
+                      });
+                    }}
+                    className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-slate-900"
+                  >
+                    <option value="1">1 Reading (Single Dimension)</option>
+                    <option value="2">2 Readings (e.g. Length, Breadth)</option>
+                    <option value="3">3 Readings (Obs 01, Obs 02, Obs 03)</option>
+                    <option value="4">4 Readings (4 Samples / Repeat)</option>
+                    <option value="5">5 Readings (5 Samples / Repeat)</option>
+                  </select>
+                </div>
+
+                {/* Dynamic Observation Input Fields */}
+                <div className="grid grid-cols-3 gap-2 mt-2">
+                  {Array.from({ length: modalData.observationCount }).map((_, idx) => (
+                    <div key={idx}>
+                      <label className="block text-slate-500 text-[10px] mb-0.5">
+                        Reading {idx + 1}
+                      </label>
+                      <input
+                        type="number"
+                        step="any"
+                        value={modalData.observations[idx] || ''}
+                        onChange={(e) => {
+                          const updated = [...modalData.observations];
+                          updated[idx] = e.target.value;
+                          setModalData({ ...modalData, observations: updated });
+                        }}
+                        placeholder={`Obs ${idx + 1}`}
+                        className="w-full bg-white border border-slate-300 rounded px-2 py-1 font-mono font-bold text-slate-900 focus:outline-none focus:border-blue-600"
+                      />
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+            {/* Modal Actions */}
+            <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
               <button
-                onClick={() => setEditModalOpen(false)}
-                className="px-4 py-2 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold text-xs"
+                type="button"
+                onClick={() => setConfigModalOpen(false)}
+                className="px-3 py-1.5 rounded border border-slate-300 text-slate-700 hover:bg-slate-100 font-medium"
               >
                 Cancel
               </button>
               <button
-                onClick={() => {
-                  updateBalloonData(modalBalloon.id, modalBalloon);
-                  setEditModalOpen(false);
-                }}
-                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md shadow-blue-500/20"
+                type="button"
+                onClick={handleSaveModalDimension}
+                className="px-4 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-semibold flex items-center gap-1.5 shadow-sm"
               >
-                Save Dimension
+                <Check className="w-3.5 h-3.5" />
+                <span>Save Dimension</span>
               </button>
             </div>
           </div>
