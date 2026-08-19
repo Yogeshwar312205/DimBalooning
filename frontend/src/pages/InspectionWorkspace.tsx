@@ -15,7 +15,7 @@ export const InspectionWorkspace: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
-  const { activeSession, setSession, activeTool } = useInspectionStore();
+  const { activeSession, setSession, activeTool, fitMode, zoomLevel, setZoomLevel, syncZoomLevel } = useInspectionStore();
   const [loading, setLoading] = useState(true);
   const [canvasDimensions, setCanvasDimensions] = useState<{ width: number; height: number; totalPages: number }>({
     width: 800,
@@ -30,6 +30,7 @@ export const InspectionWorkspace: React.FC = () => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerSize, setContainerSize] = useState<{ width: number; height: number }>({ width: 800, height: 700 });
   const [isPanning, setIsPanning] = useState(false);
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [panStart, setPanStart] = useState<{ x: number; y: number; scrollLeft: number; scrollTop: number }>({
     x: 0,
     y: 0,
@@ -65,6 +66,114 @@ export const InspectionWorkspace: React.FC = () => {
 
     return () => resizeObserver.disconnect();
   }, []);
+
+  // Spacebar listener for temporary panning
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((document.activeElement as HTMLElement)?.tagName)) {
+        return;
+      }
+      if (e.code === 'Space' && !e.repeat) {
+        setIsSpacePressed(true);
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        setIsSpacePressed(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
+
+  // Window-level Panning event listener
+  useEffect(() => {
+    if (!isPanning) return;
+
+    const handleWindowMouseMove = (e: MouseEvent) => {
+      if (!containerRef.current) return;
+      const dx = e.clientX - panStart.x;
+      const dy = e.clientY - panStart.y;
+      containerRef.current.scrollLeft = panStart.scrollLeft - dx;
+      containerRef.current.scrollTop = panStart.scrollTop - dy;
+    };
+
+    const handleWindowMouseUp = () => {
+      setIsPanning(false);
+    };
+
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+    };
+  }, [isPanning, panStart]);
+
+  // Mouse Wheel Zooming Listener
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? 0.15 : -0.15;
+        const currentZoom = useInspectionStore.getState().zoomLevel;
+        const newZoom = Math.round(Math.max(0.2, Math.min(4.0, currentZoom + delta)) * 100) / 100;
+
+        const rect = container.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        const scrollXRatio = (container.scrollLeft + mouseX) / (container.scrollWidth || 1);
+        const scrollYRatio = (container.scrollTop + mouseY) / (container.scrollHeight || 1);
+
+        setZoomLevel(newZoom);
+
+        requestAnimationFrame(() => {
+          if (container) {
+            container.scrollLeft = scrollXRatio * container.scrollWidth - mouseX;
+            container.scrollTop = scrollYRatio * container.scrollHeight - mouseY;
+          }
+        });
+      }
+    };
+
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      container.removeEventListener('wheel', handleWheel);
+    };
+  }, [setZoomLevel]);
+
+  const handleMouseDownPan = (e: React.MouseEvent) => {
+    const isPanAction = activeTool === 'PAN' || isSpacePressed || e.button === 1;
+    if (!isPanAction || !containerRef.current) return;
+
+    if (e.button === 1) {
+      e.preventDefault();
+    }
+
+    setIsPanning(true);
+    setPanStart({
+      x: e.clientX,
+      y: e.clientY,
+      scrollLeft: containerRef.current.scrollLeft,
+      scrollTop: containerRef.current.scrollTop
+    });
+  };
+
+  const handlePageRendered = (dim: { width: number; height: number; totalPages: number; scale?: number }) => {
+    setCanvasDimensions({ width: dim.width, height: dim.height, totalPages: dim.totalPages });
+    if (dim.scale && fitMode !== 'CUSTOM') {
+      syncZoomLevel(dim.scale);
+    }
+  };
 
   const fetchSessionDetails = async (sessionId: string) => {
     try {
@@ -143,29 +252,6 @@ export const InspectionWorkspace: React.FC = () => {
     } finally {
       setGeneratingPdf(false);
     }
-  };
-
-  const handleMouseDownPan = (e: React.MouseEvent) => {
-    if (activeTool !== 'PAN' || !containerRef.current) return;
-    setIsPanning(true);
-    setPanStart({
-      x: e.clientX,
-      y: e.clientY,
-      scrollLeft: containerRef.current.scrollLeft,
-      scrollTop: containerRef.current.scrollTop
-    });
-  };
-
-  const handleMouseMovePan = (e: React.MouseEvent) => {
-    if (!isPanning || activeTool !== 'PAN' || !containerRef.current) return;
-    const dx = e.clientX - panStart.x;
-    const dy = e.clientY - panStart.y;
-    containerRef.current.scrollLeft = panStart.scrollLeft - dx;
-    containerRef.current.scrollTop = panStart.scrollTop - dy;
-  };
-
-  const handleMouseUpPan = () => {
-    setIsPanning(false);
   };
 
   if (loading || !activeSession) {
@@ -256,23 +342,20 @@ export const InspectionWorkspace: React.FC = () => {
         <div
           ref={containerRef}
           onMouseDown={handleMouseDownPan}
-          onMouseMove={handleMouseMovePan}
-          onMouseUp={handleMouseUpPan}
-          onMouseLeave={handleMouseUpPan}
-          className={`flex-1 overflow-auto p-4 bg-slate-200 dark:bg-slate-950 flex items-center justify-center relative transition-colors ${
-            activeTool === 'PAN'
+          className={`flex-1 overflow-auto p-8 bg-slate-200 dark:bg-slate-950 flex relative transition-colors select-none ${
+            activeTool === 'PAN' || isSpacePressed
               ? isPanning
-                ? 'cursor-grabbing select-none'
+                ? 'cursor-grabbing'
                 : 'cursor-grab'
               : ''
           }`}
         >
-          <div className="relative inline-block my-auto select-none">
+          <div className="m-auto relative shrink-0 shadow-2xl rounded border border-slate-300 dark:border-slate-800 bg-white">
             <PDFCanvas
               pdfUrl={drawingFileUrl}
               containerWidth={containerSize.width}
               containerHeight={containerSize.height}
-              onPageRendered={(dim) => setCanvasDimensions(dim)}
+              onPageRendered={handlePageRendered}
             />
             {canvasDimensions.width > 0 && (
               <CanvasOverlay

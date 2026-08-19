@@ -37,6 +37,7 @@ interface InspectionStore {
   setFitMode: (mode: FitMode) => void;
   setCurrentPage: (page: number) => void;
   setZoomLevel: (zoom: number) => void;
+  syncZoomLevel: (zoom: number) => void;
   setOnlineCollaborators: (users: User[]) => void;
   openManualFallbackModal: (coord: ManualPendingCoord) => void;
   closeManualFallbackModal: () => void;
@@ -118,7 +119,15 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
   setActiveTool: (tool: ToolType) => set({ activeTool: tool }),
   setFitMode: (mode: FitMode) => set({ fitMode: mode }),
   setCurrentPage: (page: number) => set({ currentPage: page }),
-  setZoomLevel: (zoom: number) => set({ zoomLevel: Math.max(0.2, Math.min(4.0, zoom)), fitMode: 'CUSTOM' }),
+  setZoomLevel: (zoom: number) =>
+    set({
+      zoomLevel: Math.round(Math.max(0.2, Math.min(4.0, zoom)) * 100) / 100,
+      fitMode: 'CUSTOM'
+    }),
+  syncZoomLevel: (zoom: number) =>
+    set({
+      zoomLevel: Math.round(Math.max(0.2, Math.min(4.0, zoom)) * 100) / 100
+    }),
   setOnlineCollaborators: (users: User[]) => set({ onlineCollaborators: users }),
   openManualFallbackModal: (coord) => set({ manualFallbackModalOpen: true, manualPendingCoord: coord }),
   closeManualFallbackModal: () => set({ manualFallbackModalOpen: false, manualPendingCoord: null })

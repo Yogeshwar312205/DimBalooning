@@ -315,7 +315,7 @@ export const CanvasOverlay: React.FC<CanvasOverlayProps> = ({ width, height }) =
   }, [balloons, currentPage, selectedBalloonId, activeTool, width, height]);
 
   return (
-    <div className="absolute top-0 left-0 pointer-events-auto">
+    <div className={`absolute top-0 left-0 ${activeTool === 'PAN' ? 'pointer-events-none' : 'pointer-events-auto'}`}>
       <canvas ref={canvasElRef} />
     </div>
   );

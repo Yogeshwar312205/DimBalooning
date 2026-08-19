@@ -8,7 +8,7 @@ interface PDFCanvasProps {
   pdfUrl: string;
   containerWidth?: number;
   containerHeight?: number;
-  onPageRendered?: (dimensions: { width: number; height: number; totalPages: number }) => void;
+  onPageRendered?: (dimensions: { width: number; height: number; totalPages: number; scale: number }) => void;
 }
 
 export const PDFCanvas: React.FC<PDFCanvasProps> = ({
@@ -115,7 +115,8 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
             onPageRendered({
               width: displayWidth,
               height: displayHeight,
-              totalPages: pdfDoc.numPages
+              totalPages: pdfDoc.numPages,
+              scale: calculatedScale
             });
           }
         })
@@ -151,8 +152,6 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
   }
 
   return (
-    <div className="relative inline-block shadow-2xl rounded border dark:border-slate-800 light:border-slate-300 bg-white">
-      <canvas ref={canvasRef} className="block" />
-    </div>
+    <canvas ref={canvasRef} className="block rounded" />
   );
 };
