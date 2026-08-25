@@ -12,34 +12,58 @@ from PIL import Image
 import cv2
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# Parse single or comma-separated API keys
+raw_keys = os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY", "")
+API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 VISION_MODEL = os.getenv("VISION_MODEL", "gemini-3.6-flash")
 CONCURRENCY_LIMIT = int(os.getenv("CONCURRENCY_LIMIT", "1"))
 
 semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-# Initialize Google GenAI client if key exists
-ai_client = None
-if GEMINI_API_KEY:
-    try:
-        from google import genai
-        ai_client = genai.Client(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        print("[PDF Extractor] Google GenAI init warning:", e)
+
+class GeminiKeyPool:
+    """
+    Manages a pool of Google GenAI API keys with automatic failover rotation on 429s.
+    """
+    def __init__(self, keys: List[str]):
+        self.keys = keys
+        self.current_index = 0
+        self._clients: Dict[str, Any] = {}
+        self._lock = asyncio.Lock()
+
+    def get_client(self):
+        if not self.keys:
+            return None
+        key = self.keys[self.current_index]
+        if key not in self._clients:
+            try:
+                from google import genai
+                self._clients[key] = genai.Client(api_key=key)
+            except Exception as e:
+                print(f"[Key-Pool] Error initializing client for key #{self.current_index + 1}:", e)
+                return None
+        return self._clients[key]
+
+    async def rotate_key(self) -> bool:
+        async with self._lock:
+            if len(self.keys) <= 1:
+                return False
+            old_idx = self.current_index
+            self.current_index = (self.current_index + 1) % len(self.keys)
+            print(f"[Key-Pool Failover] Rotated from Key #{old_idx + 1} to Key #{self.current_index + 1} of {len(self.keys)}")
+            return True
+
+
+key_pool = GeminiKeyPool(API_KEYS)
 
 
 # =========================================================================
-# STAGE 1: REGEX & CAD KEYWORD FILTERING (FRIEND'S VECTOR LOGIC)
+# STAGE 1: REGEX & CAD KEYWORD FILTERING (VECTOR ENGINE)
 # =========================================================================
 
 def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
-    """
-    Parses dimension text string into nominal, upper tolerance, lower tolerance, unit, and prefix.
-    Filters out metadata text, general notes, item numbers, beam/column labels, and non-dimension CAD text.
-    """
     if not text:
         return None
 
@@ -49,7 +73,6 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
 
     upper_raw = clean_text.upper()
 
-    # Skip general note titles, text specifications & CAD non-dimension keywords
     skip_keywords = [
         "ECN", "DATE", "DRAWING", "VERSION", "MODEL", "PAGE", "SHEET", "REV", "ISO", "ART", "PART", 
         "SCALE", "AUTHOR", "CHECKED", "DOC", "TITLE", "COPYRIGHT", "DOKUMENT", "TERRACE", "BEAM", 
@@ -62,31 +85,26 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
     if any(kw in upper_raw for kw in skip_keywords):
         return None
 
-    # Ignore multi-word text blocks (sentences/notes)
     if len(clean_text.split()) > 3:
         return None
 
-    # Ignore dates like 13.10.2023 or 22/11/2022
     if re.search(r'\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}', clean_text):
         return None
 
-    # Ignore CAD element IDs like B1, B4, B8, B12, S1, S2, S3, C-01, C-09, BR2, BR4, RB, MLB
     if re.match(r'^(B|S|C|BR|RB|MLB|C-)\d*$', upper_raw):
         return None
 
-    # Strip list item prefixes like "1. ", "4. ", "10) ", "3. " at start of text
     clean_text = re.sub(r'^\d+[\.\)](?!\d)\s*', '', clean_text).strip()
     if not clean_text:
         return None
 
-    # Detect prefix (Ø, R, M, etc.)
     prefix = ""
     prefix_match = re.match(r'^([ØøRM]|SR|SØ|SQ)?\s*', clean_text, re.IGNORECASE)
     if prefix_match and prefix_match.group(1):
         prefix = prefix_match.group(1).upper()
         clean_text = clean_text[prefix_match.end():].strip()
 
-    # Pattern 0: Explicit assignment e.g. "HEIGHT = 2.77M" or "THICKNESS = 230MM"
+    # Pattern 0: Assignment e.g. "HEIGHT = 2.77M"
     assign_match = re.search(r'[=:]\s*([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z"\'°]+)?', clean_text)
     if assign_match:
         nominal = float(assign_match.group(1))
@@ -103,7 +121,7 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
                 "extractionMode": "VECTOR_AUTOMATIC"
             }
 
-    # Pattern 1: Symmetric tolerance e.g., 25 ± 0.1 or 25±0.10
+    # Pattern 1: Symmetric tolerance e.g. 25 ± 0.1
     sym_match = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*(?:±|\+/-|\+-)\s*([0-9]+(?:\.[0-9]+)?)', clean_text)
     if sym_match:
         nominal = float(sym_match.group(1))
@@ -119,7 +137,7 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
             "extractionMode": "VECTOR_AUTOMATIC"
         }
 
-    # Pattern 2: Asymmetric tolerance e.g., 25 +0.1/-0.2
+    # Pattern 2: Asymmetric tolerance e.g. 25 +0.1/-0.2
     asym_match = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*([\+\-][0-9]+(?:\.[0-9]+)?)\s*[\/ ]\s*([\+\-][0-9]+(?:\.[0-9]+)?)', clean_text)
     if asym_match:
         tol1 = float(asym_match.group(2))
@@ -135,7 +153,7 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
             "extractionMode": "VECTOR_AUTOMATIC"
         }
 
-    # Pattern 3: Single signed tolerance e.g. 25 +0.1 or 25 -0.2
+    # Pattern 3: Single signed tolerance e.g. 25 +0.1
     single_tol_match = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*([\+\-][0-9]+(?:\.[0-9]+)?)', clean_text)
     if single_tol_match:
         tol = float(single_tol_match.group(2))
@@ -150,7 +168,7 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
             "extractionMode": "VECTOR_AUTOMATIC"
         }
 
-    # Pattern 4: Simple nominal number e.g. 25 or 25.00 or 116.18
+    # Pattern 4: Simple nominal number
     nom_match = re.search(r'^([0-9]+(?:\.[0-9]+)?)', clean_text)
     if nom_match:
         nominal = float(nom_match.group(1))
@@ -174,9 +192,6 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
 
 
 def extract_vector_dimensions(page: fitz.Page) -> List[Dict[str, Any]]:
-    """
-    Extracts dimensions using PyMuPDF word-level grouping & CAD rotation transforms.
-    """
     rect = page.rect
     width, height = rect.width, rect.height
     detected = []
@@ -188,7 +203,7 @@ def extract_vector_dimensions(page: fitz.Page) -> List[Dict[str, Any]]:
 
     lines_dict = {}
     for w in words:
-        key = (w[5], w[6])  # (block_no, line_no)
+        key = (w[5], w[6])
         if key not in lines_dict:
             lines_dict[key] = []
         lines_dict[key].append(w)
@@ -248,12 +263,12 @@ def extract_vector_dimensions(page: fitz.Page) -> List[Dict[str, Any]]:
 
 
 # =========================================================================
-# STAGE 2: DYNAMIC DENSITY-BASED GEMINI VISION PIPELINE (SCANNED FALLBACK)
+# STAGE 2: DYNAMIC DENSITY-BASED GEMINI VISION PIPELINE WITH FAILOVER POOL
 # =========================================================================
 
-def _sync_gemini_call(tile_pil: Image.Image, prompt: str):
+def _sync_gemini_call(client, tile_pil: Image.Image, prompt: str):
     from google.genai import types
-    return ai_client.models.generate_content(
+    return client.models.generate_content(
         model=VISION_MODEL,
         contents=[prompt, tile_pil],
         config=types.GenerateContentConfig(
@@ -262,8 +277,12 @@ def _sync_gemini_call(tile_pil: Image.Image, prompt: str):
         )
     )
 
+
 async def call_gemini_vision_tile(tile_pil: Image.Image, tile_id: int) -> List[Dict[str, Any]]:
-    if not ai_client: return []
+    client = key_pool.get_client()
+    if not client:
+        print(f"[Vision Fallback] No valid Gemini API client configured for tile {tile_id}")
+        return []
 
     prompt = """
     Extract ALL dimensional callouts, tolerances, radii, and diameters from this engineering drawing tile.
@@ -276,7 +295,7 @@ async def call_gemini_vision_tile(tile_pil: Image.Image, tile_id: int) -> List[D
           "upperTolerance": 0.1,
           "lowerTolerance": -0.1,
           "unit": "mm",
-          "bbox": [ymin, xmin, ymax, xmax] # normalized 0 to 1000 within this tile image
+          "bbox": [ymin, xmin, ymax, xmax]
         }
       ]
     }
@@ -284,28 +303,37 @@ async def call_gemini_vision_tile(tile_pil: Image.Image, tile_id: int) -> List[D
     """
 
     async with semaphore:
-        for attempt in range(5):
+        max_attempts = max(3, len(key_pool.keys) * 2)
+        for attempt in range(max_attempts):
             try:
-                response = await asyncio.to_thread(_sync_gemini_call, tile_pil, prompt)
+                active_client = key_pool.get_client()
+                response = await asyncio.to_thread(_sync_gemini_call, active_client, tile_pil, prompt)
                 raw_text = response.text.strip() if response.text else ""
-                if raw_text.startswith("```json"): raw_text = raw_text[7:]
-                if raw_text.endswith("```"): raw_text = raw_text[:-3]
+                if raw_text.startswith("```json"):
+                    raw_text = raw_text[7:]
+                if raw_text.endswith("```"):
+                    raw_text = raw_text[:-3]
                 return json.loads(raw_text.strip()).get("dimensions", [])
             except Exception as ex:
-                if "429" in str(ex) and attempt < 4:
-                    print(f"[Vision Fallback] Rate limited on tile {tile_id}. Waiting 20s...")
-                    await asyncio.sleep(20.0)
+                err_msg = str(ex)
+                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    rotated = await key_pool.rotate_key()
+                    if rotated:
+                        print(f"[Vision Fallback] 429 encountered on tile {tile_id}. Instantly retrying with next key in pool...")
+                        await asyncio.sleep(0.5)
+                        continue
+                    else:
+                        print(f"[Vision Fallback] All keys exhausted on tile {tile_id}. Backing off 10s...")
+                        await asyncio.sleep(10.0)
                 else:
                     print(f"[Vision Fallback] Error on tile {tile_id}: {ex}")
                     return []
         return []
 
+
 async def extract_scanned_dimensions_gemini(page: fitz.Page) -> List[Dict[str, Any]]:
-    """
-    Renders scanned page to image, measures OpenCV edge density, slices dynamically (2x2 or 3x3),
-    and executes Gemini Vision extraction.
-    """
-    if not ai_client:
+    client = key_pool.get_client()
+    if not client:
         return []
 
     # 1. High-DPI Render
@@ -319,7 +347,6 @@ async def extract_scanned_dimensions_gemini(page: fitz.Page) -> List[Dict[str, A
     edges = cv2.Canny(gray, 50, 150)
     density = np.count_nonzero(edges) / float(edges.size)
 
-    # Dynamic Grid Sizing based on density
     grid_dim = 3 if density > 0.035 else 2
     print(f"[Smart Router] Drawing Edge Density: {density:.4f} -> Slicing into {grid_dim}x{grid_dim} Grid")
 
@@ -336,7 +363,6 @@ async def extract_scanned_dimensions_gemini(page: fitz.Page) -> List[Dict[str, A
             y_max = min(h, int((r + 1) * base_h + (overlap_y if r < grid_dim - 1 else 0)))
 
             tile_crop = img_pil.crop((x_min, y_min, x_max, y_max))
-            # OpenCV blank filter on tile
             t_gray = cv2.cvtColor(np.array(tile_crop), cv2.COLOR_RGB2GRAY)
             t_edges = cv2.Canny(t_gray, 50, 150)
             if (np.count_nonzero(t_edges) / float(t_edges.size) >= 0.0035) or (float(np.var(t_gray)) > 400.0):
@@ -347,11 +373,9 @@ async def extract_scanned_dimensions_gemini(page: fitz.Page) -> List[Dict[str, A
                 })
             tile_id += 1
 
-    # Concurrent Gemini calls
     tasks = [call_gemini_vision_tile(t["image"], t["tileId"]) for t in tiles]
     all_dims = await asyncio.gather(*tasks)
 
-    # Stitch and format
     raw_detections = []
     for tile, dims in zip(tiles, all_dims):
         x0_norm, y0_norm, x1_norm, y1_norm = tile["normBounds"]
@@ -383,7 +407,7 @@ async def extract_scanned_dimensions_gemini(page: fitz.Page) -> List[Dict[str, A
                 "extractionMode": "GEMINI_VISION_AI"
             })
 
-    # Deduplicate
+    # Deduplicate within 4.5% distance threshold
     deduped = []
     for item in raw_detections:
         if not any(math.hypot(item["normX"] - ex["normX"], item["normY"] - ex["normY"]) < 0.045 and abs(item["nominalValue"] - ex["nominalValue"]) < 0.05 for ex in deduped):
@@ -393,15 +417,10 @@ async def extract_scanned_dimensions_gemini(page: fitz.Page) -> List[Dict[str, A
 
 
 # =========================================================================
-# MAIN ENTRY POINT: THE SMART TRI-ENGINE ROUTER
+# MAIN ENTRY POINT
 # =========================================================================
 
 async def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Dict[str, Any]:
-    """
-    Main Orchestrator:
-    1. Checks if PDF contains Vector Text -> Runs PyMuPDF Word-Level Engine (Instant, $0).
-    2. If Vector Text is empty (Scanned Drawing) -> Runs Density-Based Gemini Vision AI Engine.
-    """
     start_time = time.time()
     try:
         doc = fitz.open(file_path)
@@ -410,11 +429,11 @@ async def extract_all_dimensions_from_page(file_path: str, page_number: int = 1)
 
         page = doc[page_number - 1]
 
-        # 1. Try Vector Engine First!
+        # 1. Try Vector Engine First (Instant, $0)
         detected = extract_vector_dimensions(page)
         engine_used = "PYMUPDF_VECTOR_FAST_TRACK"
 
-        # 2. If Scanned/Flat PDF (0 vector items found), Fallback to Gemini AI Engine!
+        # 2. If Scanned/Flat PDF, Fallback to Vision AI Engine
         if len(detected) == 0:
             print("[Smart Router] No vector text found. Switching to Gemini Vision AI Fallback...")
             detected = await extract_scanned_dimensions_gemini(page)
@@ -436,9 +455,6 @@ async def extract_all_dimensions_from_page(file_path: str, page_number: int = 1)
 
 
 def extract_text_at_coordinate(file_path: str, page_number: int, norm_x: float, norm_y: float) -> Dict[str, Any]:
-    """
-    Extracts text near normalized coordinates for manual click fallbacks.
-    """
     try:
         doc = fitz.open(file_path)
         page = doc[page_number - 1]
