@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
-import authRoutes from './routes/authRoutes';
 import drawingRoutes from './routes/drawingRoutes';
 import inspectionRoutes from './routes/inspectionRoutes';
 import balloonRoutes from './routes/balloonRoutes';
@@ -23,8 +22,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'backend-api', timestamp: new Date() });
 });
 
-// API Routes
-app.use('/api/auth', authRoutes);
+// API Routes (Frictionless / No Auth Barrier)
 app.use('/api/drawings', drawingRoutes);
 app.use('/api/inspections', inspectionRoutes);
 app.use('/api/balloons', balloonRoutes);
