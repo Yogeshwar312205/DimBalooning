@@ -19,7 +19,7 @@ def get_ocr_reader():
 def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
     """
     Parses dimension text string into nominal, upper tolerance, lower tolerance, unit, and prefix.
-    Filters out metadata text (dates, part numbers, titles, ECN, ISO).
+    Filters out metadata text, general notes, item numbers, beam/column labels, and non-dimension CAD text.
     """
     if not text:
         return None
@@ -28,14 +28,36 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
     if not clean_text:
         return None
 
-    # Filter out title block / metadata keywords
     upper_raw = clean_text.upper()
-    skip_keywords = ["ECN", "DATE", "DRAWING", "VERSION", "MODEL", "PAGE", "SHEET", "REV", "ISO", "ART", "PART", "SCALE", "AUTHOR", "CHECKED", "DOC", "TITLE", "COPYRIGHT", "DOKUMENT"]
+
+    # Skip general note titles, text specifications & CAD non-dimension keywords
+    skip_keywords = [
+        "ECN", "DATE", "DRAWING", "VERSION", "MODEL", "PAGE", "SHEET", "REV", "ISO", "ART", "PART", 
+        "SCALE", "AUTHOR", "CHECKED", "DOC", "TITLE", "COPYRIGHT", "DOKUMENT", "TERRACE", "BEAM", 
+        "SLAB", "LAYOUT", "LEVEL", "SECTION", "ELEVATION", "SCHEDULE", "NOTES", "LEGEND", "STRUCTURE", 
+        "DETAILS", "CONSTRUCTION", "THICKNESS", "STAIRCASE", "RISER", "TREAD", "PLINTH", "EXPOSURE", 
+        "CONDITION", "GRADE", "CONCRETE", "STEEL", "BRICK", "COLUMN", "PROJECT", "CLIENT", "ARCHITECT",
+        "ENGINEER", "REVISION", "NOTE", "NORTH", "BELOW", "WALL", "HEIGHT", "THK", "PCC", "FLOORING",
+        "INTERNAL", "EXTERNAL", "FRAME", "FRAMED", "COBA", "BAT", "FINISH", "DOG", "LEGGED", "TYPE"
+    ]
     if any(kw in upper_raw for kw in skip_keywords):
+        return None
+
+    # Ignore multi-word text blocks (sentences/notes)
+    if len(clean_text.split()) > 3:
         return None
 
     # Ignore dates like 13.10.2023 or 22/11/2022
     if re.search(r'\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}', clean_text):
+        return None
+
+    # Ignore CAD element IDs like B1, B4, B8, B12, S1, S2, S3, C-01, C-09, BR2, BR4, RB, MLB
+    if re.match(r'^(B|S|C|BR|RB|MLB|C-)\d*$', upper_raw):
+        return None
+
+    # Strip list item prefixes like "1. ", "4. ", "10) ", "3. " at start of text (excluding decimals like 3.67)
+    clean_text = re.sub(r'^\d+[\.\)](?!\d)\s*', '', clean_text).strip()
+    if not clean_text:
         return None
 
     # Detect prefix (Ø, R, M, etc.)
@@ -44,6 +66,23 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
     if prefix_match and prefix_match.group(1):
         prefix = prefix_match.group(1).upper()
         clean_text = clean_text[prefix_match.end():].strip()
+
+    # Pattern 0: Explicit assignment e.g. "HEIGHT = 2.77M" or "THICKNESS = 230MM" or "RISER = 170MM"
+    assign_match = re.search(r'[=:]\s*([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z"\'°]+)?', clean_text)
+    if assign_match:
+        nominal = float(assign_match.group(1))
+        unit = assign_match.group(2).lower() if assign_match.group(2) else "mm"
+        if 0 < nominal <= 9999:
+            return {
+                "found": True,
+                "rawText": text.strip(),
+                "nominalValue": nominal,
+                "upperTolerance": 0.0,
+                "lowerTolerance": 0.0,
+                "unit": unit,
+                "prefix": prefix,
+                "extractionMode": "AUTOMATIC"
+            }
 
     # Pattern 1: Symmetric tolerance e.g., 25 ± 0.1 or 25±0.10
     sym_match = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*(?:±|\+/-|\+-)\s*([0-9]+(?:\.[0-9]+)?)', clean_text)
@@ -98,10 +137,15 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
             "extractionMode": "AUTOMATIC"
         }
 
-    # Pattern 4: Simple nominal number e.g. 25 or 25.00 or 116.18
+    # Pattern 4: Simple nominal number e.g. 25 or 25.00 or 116.18 or 3.67
     nom_match = re.search(r'^([0-9]+(?:\.[0-9]+)?)', clean_text)
     if nom_match:
         nominal = float(nom_match.group(1))
+        # Filter single-digit whole numbers without decimals (e.g. "1", "2", "3", "4", "5", "6", "7", "8", "9")
+        # unless accompanied by units or decimals, to avoid ballooning general list item numbers or beam indices
+        if nominal.is_integer() and nominal < 10 and not re.search(r'(mm|m|cm|in|\"|\'|°)', clean_text, re.IGNORECASE):
+            return None
+
         # Ignore huge numbers like part numbers (e.g. 13523526)
         if nominal > 9999 or nominal == 0:
             return None

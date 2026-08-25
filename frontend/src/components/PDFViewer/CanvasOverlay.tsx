@@ -194,8 +194,13 @@ export const CanvasOverlay: React.FC<CanvasOverlayProps> = ({ width, height }) =
     const pageBalloons = balloons.filter((b) => b.pageNumber === currentPage);
 
     pageBalloons.forEach((b) => {
-      const px = b.x * width;
-      const py = b.y * height;
+      const radius = 16;
+      let px = b.x * width;
+      let py = b.y * height;
+
+      // Strict canvas border clamping to keep balloons 100% visible inside drawing area
+      px = Math.max(radius + 10, Math.min(width - radius - 10, px));
+      py = Math.max(radius + 10, Math.min(height - radius - 10, py));
 
       const status = (b.measurement?.status || 'PENDING').toUpperCase();
       const colors = STATUS_COLORS[status] || STATUS_COLORS.PENDING;
@@ -205,8 +210,11 @@ export const CanvasOverlay: React.FC<CanvasOverlayProps> = ({ width, height }) =
       let targetDot: fabric.Circle | null = null;
 
       const hasLeader = b.leaderStartX !== null && b.leaderStartX !== undefined && b.leaderStartY !== null && b.leaderStartY !== undefined;
-      const lx = hasLeader ? b.leaderStartX! * width : (px - 28);
-      const ly = hasLeader ? b.leaderStartY! * height : (py + 20);
+      let lx = hasLeader ? b.leaderStartX! * width : (px < width / 2 ? px + 35 : px - 35);
+      let ly = hasLeader ? b.leaderStartY! * height : (py > height / 2 ? py - 25 : py + 25);
+
+      lx = Math.max(5, Math.min(width - 5, lx));
+      ly = Math.max(5, Math.min(height - 5, ly));
 
       const dist = Math.hypot(lx - px, ly - py);
 

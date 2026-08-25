@@ -217,9 +217,12 @@ export async function autoDetectBalloons(req: AuthRequest, res: Response) {
       currentMaxNum++;
       const targetX = item.normX;
       const targetY = item.normY;
-      // Offset balloon circle slightly so it doesn't overlap text and draws dotted leader line
-      const balloonX = Math.min(0.96, targetX + 0.035);
-      const balloonY = Math.max(0.02, targetY - 0.025);
+      // Smart offset for balloon circle: shift right if on left side, shift left if on right side
+      const offsetX = targetX < 0.85 ? 0.04 : -0.04;
+      const offsetY = targetY > 0.15 ? -0.03 : 0.03;
+
+      const balloonX = Math.max(0.04, Math.min(0.96, targetX + offsetX));
+      const balloonY = Math.max(0.04, Math.min(0.96, targetY + offsetY));
 
       const balloon = await prisma.balloon.create({
         data: {
