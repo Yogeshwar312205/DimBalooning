@@ -1,10 +1,9 @@
-import { Response } from 'express';
-import { AuthRequest } from '../middleware/authMiddleware';
+import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
-export async function createInspectionSession(req: AuthRequest, res: Response) {
+export async function createInspectionSession(req: Request, res: Response) {
   try {
     const { drawingId, name, partNumber, partName, revision, batchNumber } = req.body;
 
@@ -25,12 +24,10 @@ export async function createInspectionSession(req: AuthRequest, res: Response) {
         partName,
         revision: revision || drawing.revision || 'Rev A',
         batchNumber,
-        status: 'IN_PROGRESS',
-        createdById: req.user!.id
+        status: 'IN_PROGRESS'
       },
       include: {
-        drawing: true,
-        createdBy: { select: { id: true, name: true, email: true } }
+        drawing: true
       }
     });
 
@@ -44,13 +41,12 @@ export async function createInspectionSession(req: AuthRequest, res: Response) {
   }
 }
 
-export async function getInspectionSessions(req: AuthRequest, res: Response) {
+export async function getInspectionSessions(req: Request, res: Response) {
   try {
     const sessions = await prisma.inspectionSession.findMany({
       orderBy: { updatedAt: 'desc' },
       include: {
         drawing: true,
-        createdBy: { select: { id: true, name: true, email: true } },
         _count: { select: { balloons: true } }
       }
     });
@@ -60,25 +56,18 @@ export async function getInspectionSessions(req: AuthRequest, res: Response) {
   }
 }
 
-export async function getInspectionSessionById(req: AuthRequest, res: Response) {
+export async function getInspectionSessionById(req: Request, res: Response) {
   try {
     const { id } = req.params;
     const session = await prisma.inspectionSession.findUnique({
       where: { id },
       include: {
         drawing: true,
-        createdBy: { select: { id: true, name: true, email: true } },
         balloons: {
           include: {
-            measurement: true,
-            createdBy: { select: { id: true, name: true } }
+            measurement: true
           },
           orderBy: { balloonNumber: 'asc' }
-        },
-        collaborators: {
-          include: {
-            user: { select: { id: true, name: true, email: true, role: true } }
-          }
         }
       }
     });
@@ -94,7 +83,7 @@ export async function getInspectionSessionById(req: AuthRequest, res: Response) 
   }
 }
 
-export async function updateInspectionStatus(req: AuthRequest, res: Response) {
+export async function updateInspectionStatus(req: Request, res: Response) {
   try {
     const { id } = req.params;
     const { status } = req.body;
@@ -116,7 +105,7 @@ export async function updateInspectionStatus(req: AuthRequest, res: Response) {
   }
 }
 
-export async function getDashboardStats(req: AuthRequest, res: Response) {
+export async function getDashboardStats(req: Request, res: Response) {
   try {
     const totalDrawings = await prisma.drawing.count();
     const totalSessions = await prisma.inspectionSession.count();
@@ -151,7 +140,6 @@ export async function getDashboardStats(req: AuthRequest, res: Response) {
       orderBy: { updatedAt: 'desc' },
       include: {
         drawing: { select: { name: true } },
-        createdBy: { select: { name: true } },
         _count: { select: { balloons: true } }
       }
     });

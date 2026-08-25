@@ -2,8 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { uploadDrawing, getDrawings, getDrawingById, getDrawingFile } from '../controllers/drawingController';
-import { authenticateToken } from '../middleware/authMiddleware';
+import { uploadDrawing, extractDrawing, getDrawings, getDrawingById, getDrawingFile } from '../controllers/drawingController';
 import { config } from '../config';
 
 const uploadDir = path.resolve(config.uploadDir);
@@ -33,9 +32,9 @@ const upload = multer({
 
 const router = Router();
 
-router.use(authenticateToken);
-
+// Routes (Frictionless / No Auth Barrier)
 router.post('/', upload.single('pdf'), uploadDrawing);
+router.post('/:id/extract', extractDrawing);
 router.get('/', getDrawings);
 router.get('/:id', getDrawingById);
 router.get('/:id/file', getDrawingFile);

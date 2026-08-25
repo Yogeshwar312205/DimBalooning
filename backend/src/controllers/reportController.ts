@@ -1,5 +1,4 @@
-import { Response } from 'express';
-import { AuthRequest } from '../middleware/authMiddleware';
+import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import path from 'path';
 import fs from 'fs';
@@ -9,7 +8,7 @@ import { config } from '../config';
 
 const prisma = new PrismaClient();
 
-export async function generateExcel(req: AuthRequest, res: Response) {
+export async function generateExcel(req: Request, res: Response) {
   try {
     const { inspectionSessionId, companyName } = req.body;
     if (!inspectionSessionId) {
@@ -20,7 +19,6 @@ export async function generateExcel(req: AuthRequest, res: Response) {
       where: { id: inspectionSessionId },
       include: {
         drawing: true,
-        createdBy: true,
         balloons: {
           include: { measurement: true },
           orderBy: { balloonNumber: 'asc' }
@@ -47,13 +45,13 @@ export async function generateExcel(req: AuthRequest, res: Response) {
     }));
 
     const excelPath = await generateExcelReport({
-      companyName: companyName || 'Industrial Precision Engineering',
+      companyName: companyName || 'Valmet Quality Assurance',
       partName: session.partName,
       partNumber: session.partNumber,
       drawingName: session.drawing.name,
       revision: session.revision,
       batchNumber: session.batchNumber,
-      inspectorName: session.createdBy.name,
+      inspectorName: 'QA Lead Inspector',
       inspectionDate: new Date(session.createdAt).toLocaleDateString(),
       items
     });
@@ -62,8 +60,7 @@ export async function generateExcel(req: AuthRequest, res: Response) {
       data: {
         inspectionSessionId,
         type: 'EXCEL',
-        filePath: excelPath,
-        generatedById: req.user!.id
+        filePath: excelPath
       }
     });
 
@@ -78,7 +75,7 @@ export async function generateExcel(req: AuthRequest, res: Response) {
   }
 }
 
-export async function generateMarkedPdf(req: AuthRequest, res: Response) {
+export async function generateMarkedPdf(req: Request, res: Response) {
   try {
     const { inspectionSessionId } = req.body;
     if (!inspectionSessionId) {
@@ -118,14 +115,13 @@ export async function generateMarkedPdf(req: AuthRequest, res: Response) {
       leaderStartY: b.leaderStartY
     }));
 
-    const result = await requestMarkedUpPdf(inputPdfPath, outputPdfPath, balloonsData);
+    await requestMarkedUpPdf(inputPdfPath, outputPdfPath, balloonsData);
 
     const report = await prisma.report.create({
       data: {
         inspectionSessionId,
         type: 'MARKED_PDF',
-        filePath: outputPdfPath,
-        generatedById: req.user!.id
+        filePath: outputPdfPath
       }
     });
 
@@ -140,7 +136,7 @@ export async function generateMarkedPdf(req: AuthRequest, res: Response) {
   }
 }
 
-export async function downloadReport(req: AuthRequest, res: Response) {
+export async function downloadReport(req: Request, res: Response) {
   try {
     const { id } = req.params;
     const report = await prisma.report.findUnique({ where: { id } });
@@ -155,8 +151,10 @@ export async function downloadReport(req: AuthRequest, res: Response) {
 
     if (report.type === 'EXCEL') {
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${path.basename(filePath)}"`);
     } else if (report.type === 'MARKED_PDF') {
       res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${path.basename(filePath)}"`);
     }
 
     return res.sendFile(filePath);
@@ -165,13 +163,12 @@ export async function downloadReport(req: AuthRequest, res: Response) {
   }
 }
 
-export async function getSessionReports(req: AuthRequest, res: Response) {
+export async function getSessionReports(req: Request, res: Response) {
   try {
     const { sessionId } = req.params;
     const reports = await prisma.report.findMany({
       where: { inspectionSessionId: sessionId },
-      orderBy: { createdAt: 'desc' },
-      include: { generatedBy: { select: { id: true, name: true } } }
+      orderBy: { createdAt: 'desc' }
     });
     return res.json({ reports });
   } catch (error: any) {

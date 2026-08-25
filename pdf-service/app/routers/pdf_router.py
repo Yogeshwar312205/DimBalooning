@@ -1,25 +1,25 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
 import os
-import shutil
-import tempfile
-from app.services.pdf_extractor import extract_text_at_coordinate, get_pdf_metadata
+from app.services.pdf_extractor import (
+    extract_text_at_coordinate, 
+    get_pdf_metadata, 
+    extract_all_dimensions_from_page
+)
 from app.services.pdf_markup import generate_marked_up_pdf
-from app.services.vision_pipeline import execute_automated_vision_pipeline
 
 router = APIRouter(prefix="/api/pdf", tags=["PDF Processing"])
 
-class AutoExtractRequest(BaseModel):
-    filePath: str
-    pageNumber: int = 1
-
 class ExtractTextRequest(BaseModel):
-
     filePath: str
     pageNumber: int = 1
     normX: float
     normY: float
+
+class ExtractAllRequest(BaseModel):
+    filePath: str
+    pageNumber: int = 1
 
 class BalloonMarkupItem(BaseModel):
     pageNumber: int = 1
@@ -35,24 +35,22 @@ class MarkupPDFRequest(BaseModel):
     outputPdfPath: str
     balloons: List[BalloonMarkupItem]
 
-@router.post("/auto-extract")
-async def auto_extract(req: AutoExtractRequest):
-    if not os.path.exists(req.filePath):
-        raise HTTPException(status_code=404, detail=f"PDF file not found at {req.filePath}")
-    
-    try:
-        result = await execute_automated_vision_pipeline(req.filePath, req.pageNumber)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Automated vision extraction failed: {str(e)}")
-
 @router.post("/extract-text")
 def extract_text(req: ExtractTextRequest):
+    if not os.path.exists(req.filePath):
+        raise HTTPException(status_code=404, detail=f"PDF file not found at {req.filePath}")
+    return extract_text_at_coordinate(req.filePath, req.pageNumber, req.normX, req.normY)
 
+# Asynchronous endpoint to support both Vector instant extraction and Gemini Vision fallback
+@router.post("/extract-all")
+@router.post("/auto-extract")
+async def extract_all(req: ExtractAllRequest):
     if not os.path.exists(req.filePath):
         raise HTTPException(status_code=404, detail=f"PDF file not found at {req.filePath}")
     
-    result = extract_text_at_coordinate(req.filePath, req.pageNumber, req.normX, req.normY)
+    result = await extract_all_dimensions_from_page(req.filePath, req.pageNumber)
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Extraction failed"))
     return result
 
 @router.post("/generate-markup")
@@ -60,15 +58,12 @@ def generate_markup(req: MarkupPDFRequest):
     if not os.path.exists(req.inputPdfPath):
         raise HTTPException(status_code=404, detail=f"Input PDF file not found at {req.inputPdfPath}")
     
-    # Ensure directory for output PDF exists
     os.makedirs(os.path.dirname(os.path.abspath(req.outputPdfPath)), exist_ok=True)
-    
     balloons_dict = [b.dict() for b in req.balloons]
     result = generate_marked_up_pdf(req.inputPdfPath, req.outputPdfPath, balloons_dict)
     
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("error", "Failed to generate marked-up PDF"))
-        
     return result
 
 @router.get("/info")

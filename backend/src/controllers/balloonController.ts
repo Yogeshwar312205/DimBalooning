@@ -1,5 +1,4 @@
-import { Response } from 'express';
-import { AuthRequest } from '../middleware/authMiddleware';
+import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import path from 'path';
 import { extractDimensionFromPdf, autoExtractDimensionsFromPdf } from '../services/pdfServiceConnector';
@@ -8,7 +7,7 @@ import { broadcastToInspectionSession } from '../websocket/socketHandler';
 
 const prisma = new PrismaClient();
 
-export async function autoExtractBalloons(req: AuthRequest, res: Response) {
+export async function autoExtractBalloons(req: Request, res: Response) {
   try {
     const { sessionId } = req.params;
     const { pageNumber = 1, clearExisting = false } = req.body;
@@ -30,11 +29,13 @@ export async function autoExtractBalloons(req: AuthRequest, res: Response) {
 
     const drawingPath = path.resolve(session.drawing.filePath);
 
-    // Call Python Vision Pipeline
+    // Call Python Smart Tri-Engine
     const extractionResult = await autoExtractDimensionsFromPdf({
       filePath: drawingPath,
       pageNumber
     });
+
+    const items = extractionResult.items || extractionResult.balloons || [];
 
     const existingBalloons = await prisma.balloon.findMany({
       where: { inspectionSessionId: sessionId },
@@ -47,11 +48,16 @@ export async function autoExtractBalloons(req: AuthRequest, res: Response) {
 
     const createdBalloons: any[] = [];
 
-    // Save each extracted dimension into DB inside Prisma transaction
-    for (const item of extractionResult.balloons) {
-      const nominal = item.nominalValue !== undefined ? item.nominalValue : null;
-      const upperTol = item.upperTolerance !== undefined ? item.upperTolerance : null;
-      const lowerTol = item.lowerTolerance !== undefined ? item.lowerTolerance : null;
+    // Save each extracted dimension into DB
+    for (const item of items) {
+      const anchorX = item.normX !== undefined ? item.normX : (item.x ?? 0.5);
+      const anchorY = item.normY !== undefined ? item.normY : (item.y ?? 0.5);
+      const balloonX = item.x !== undefined ? item.x : Math.max(0.02, Math.min(0.98, anchorX + 0.03));
+      const balloonY = item.y !== undefined ? item.y : Math.max(0.02, Math.min(0.98, anchorY - 0.03));
+
+      const nominal = item.nominalValue !== undefined && item.nominalValue !== null ? Number(item.nominalValue) : null;
+      const upperTol = item.upperTolerance !== undefined && item.upperTolerance !== null ? Number(item.upperTolerance) : 0;
+      const lowerTol = item.lowerTolerance !== undefined && item.lowerTolerance !== null ? Number(item.lowerTolerance) : 0;
       const initialTolerance = calculateTolerance(nominal, upperTol, lowerTol, null);
 
       const balloon = await prisma.balloon.create({
@@ -59,25 +65,20 @@ export async function autoExtractBalloons(req: AuthRequest, res: Response) {
           inspectionSessionId: sessionId,
           balloonNumber: currentBalloonNum,
           pageNumber,
-          x: item.x,
-          y: item.y,
+          x: Number(balloonX.toFixed(4)),
+          y: Number(balloonY.toFixed(4)),
           width: 0.04,
           height: 0.04,
-          leaderStartX: item.leaderStartX ?? null,
-          leaderStartY: item.leaderStartY ?? null,
-          
-          // --- NEW AI EXTRACTED POSTGRES FIELDS ---
-          isAiExtracted: item.isAiExtracted || true,
+          leaderStartX: Number(anchorX.toFixed(4)),
+          leaderStartY: Number(anchorY.toFixed(4)),
+          isAiExtracted: item.isAiExtracted ?? (item.extractionMode !== 'VECTOR_AUTOMATIC'),
           nominalValue: nominal,
           upperTolerance: upperTol,
           lowerTolerance: lowerTol,
           unit: item.unit || 'mm',
-          // -----------------------------------------
-
-          createdById: req.user!.id,
           measurement: {
             create: {
-              dimensionText: item.dimensionText || `Dim #${currentBalloonNum}`,
+              dimensionText: item.rawText || item.dimensionText || `Dim #${currentBalloonNum}`,
               nominalValue: nominal,
               upperTolerance: upperTol,
               lowerTolerance: lowerTol,
@@ -90,8 +91,7 @@ export async function autoExtractBalloons(req: AuthRequest, res: Response) {
           }
         },
         include: {
-          measurement: true,
-          createdBy: { select: { id: true, name: true } }
+          measurement: true
         }
       });
 
@@ -99,15 +99,14 @@ export async function autoExtractBalloons(req: AuthRequest, res: Response) {
       currentBalloonNum++;
     }
 
-    // Broadcast WebSocket event to all inspectors in the session
+    // Broadcast WebSocket event
     broadcastToInspectionSession(sessionId, 'BALLOONS_AUTO_EXTRACTED', {
       sessionId,
       balloons: createdBalloons,
       extractionSummary: {
-        skippedBlankTiles: extractionResult.skippedBlankTiles,
         extractedCount: createdBalloons.length,
-        processingTimeSeconds: extractionResult.processingTimeSeconds,
-        macroMetadata: extractionResult.macroMetadata
+        processingTimeSeconds: extractionResult.processingTimeSeconds || 0,
+        engine: extractionResult.engine || 'SMART_ROUTER'
       }
     });
 
@@ -115,20 +114,18 @@ export async function autoExtractBalloons(req: AuthRequest, res: Response) {
       message: `Successfully auto-extracted ${createdBalloons.length} dimensions`,
       balloons: createdBalloons,
       extractionSummary: {
-        skippedBlankTiles: extractionResult.skippedBlankTiles,
         extractedCount: createdBalloons.length,
-        processingTimeSeconds: extractionResult.processingTimeSeconds,
-        macroMetadata: extractionResult.macroMetadata
+        processingTimeSeconds: extractionResult.processingTimeSeconds || 0,
+        engine: extractionResult.engine || 'SMART_ROUTER'
       }
     });
   } catch (error: any) {
     console.error('Auto-extract balloons error:', error);
-    return res.status(500).json({ error: error.message || 'Failed to auto-extract dimensions from drawing' });
+    return res.status(500).json({ error: error.message || 'Failed to auto-extract dimensions' });
   }
 }
 
-
-export async function createBalloon(req: AuthRequest, res: Response) {
+export async function createBalloon(req: Request, res: Response) {
   try {
     const {
       inspectionSessionId,
@@ -160,11 +157,9 @@ export async function createBalloon(req: AuthRequest, res: Response) {
       select: { balloonNumber: true }
     });
 
-    let nextBalloonNumber = 1;
-    if (existingBalloons.length > 0) {
-      const maxNum = Math.max(...existingBalloons.map(b => b.balloonNumber));
-      nextBalloonNumber = maxNum + 1;
-    }
+    let nextBalloonNumber = existingBalloons.length > 0
+      ? Math.max(...existingBalloons.map(b => b.balloonNumber)) + 1
+      : 1;
 
     let extracted: any = null;
     if (manualDimension) {
@@ -188,8 +183,8 @@ export async function createBalloon(req: AuthRequest, res: Response) {
     }
 
     const nominal = extracted?.nominalValue !== undefined ? extracted.nominalValue : null;
-    const upperTol = extracted?.upperTolerance !== undefined ? extracted.upperTolerance : null;
-    const lowerTol = extracted?.lowerTolerance !== undefined ? extracted.lowerTolerance : null;
+    const upperTol = extracted?.upperTolerance !== undefined ? extracted.upperTolerance : 0;
+    const lowerTol = extracted?.lowerTolerance !== undefined ? extracted.lowerTolerance : 0;
     const initialTolerance = calculateTolerance(nominal, upperTol, lowerTol, null);
 
     const balloon = await prisma.balloon.create({
@@ -203,16 +198,11 @@ export async function createBalloon(req: AuthRequest, res: Response) {
         height,
         leaderStartX: leaderStartX ?? null,
         leaderStartY: leaderStartY ?? null,
-        
-        // --- NEW POSTGRES FIELDS FOR MANUAL BALLOONS ---
-        isAiExtracted: false, // Explicitly false for manually drawn balloons
+        isAiExtracted: false,
         nominalValue: nominal,
         upperTolerance: upperTol,
         lowerTolerance: lowerTol,
-        unit: extracted?.unit || 'mm',
-        // -----------------------------------------------
-
-        createdById: req.user!.id
+        unit: extracted?.unit || 'mm'
       }
     });
 
@@ -233,8 +223,7 @@ export async function createBalloon(req: AuthRequest, res: Response) {
 
     const resultBalloon = {
       ...balloon,
-      measurement,
-      createdBy: { id: req.user!.id, name: req.user!.name }
+      measurement
     };
 
     broadcastToInspectionSession(inspectionSessionId, 'BALLOON_CREATED', {
@@ -253,7 +242,7 @@ export async function createBalloon(req: AuthRequest, res: Response) {
   }
 }
 
-export async function updateBalloon(req: AuthRequest, res: Response) {
+export async function updateBalloon(req: Request, res: Response) {
   try {
     const { id } = req.params;
     const { x, y, leaderStartX, leaderStartY, leaderEndX, leaderEndY } = req.body;
@@ -279,7 +268,7 @@ export async function updateBalloon(req: AuthRequest, res: Response) {
   }
 }
 
-export async function deleteBalloon(req: AuthRequest, res: Response) {
+export async function deleteBalloon(req: Request, res: Response) {
   try {
     const { id } = req.params;
     const balloon = await prisma.balloon.findUnique({ where: { id } });
