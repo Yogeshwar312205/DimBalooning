@@ -1,11 +1,16 @@
 import { create } from 'zustand';
 import { InspectionSession } from '../types/inspection';
 import { Balloon, Measurement } from '../types/balloon';
-import { User } from '../types/auth';
 import api from '../services/api';
 
 export type ToolType = 'SELECT' | 'BALLOON' | 'PAN';
 export type FitMode = 'FIT_PAGE' | 'FIT_WIDTH' | 'CUSTOM';
+
+export interface InspectorUser {
+  id?: string;
+  name: string;
+  role?: string;
+}
 
 export interface ManualPendingCoord {
   x: number;
@@ -22,7 +27,8 @@ interface InspectionStore {
   fitMode: FitMode;
   currentPage: number;
   zoomLevel: number;
-  onlineCollaborators: User[];
+  rotation: number;
+  onlineCollaborators: InspectorUser[];
   manualFallbackModalOpen: boolean;
   manualPendingCoord: ManualPendingCoord | null;
   isAutoExtracting: boolean;
@@ -40,12 +46,13 @@ interface InspectionStore {
   setFitMode: (mode: FitMode) => void;
   setCurrentPage: (page: number) => void;
   setZoomLevel: (zoom: number) => void;
-  setOnlineCollaborators: (users: User[]) => void;
+  rotateCanvas: () => void;
+  setRotation: (rotation: number) => void;
+  setOnlineCollaborators: (users: InspectorUser[]) => void;
   openManualFallbackModal: (coord: ManualPendingCoord) => void;
   closeManualFallbackModal: () => void;
   setIsAutoExtracting: (loading: boolean) => void;
 }
-
 
 export const useInspectionStore = create<InspectionStore>((set, get) => ({
   activeSession: null,
@@ -55,6 +62,7 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
   fitMode: 'FIT_PAGE',
   currentPage: 1,
   zoomLevel: 1.0,
+  rotation: 0,
   onlineCollaborators: [],
   manualFallbackModalOpen: false,
   manualPendingCoord: null,
@@ -66,7 +74,8 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
       balloons: session.balloons || [],
       selectedBalloonId: null,
       currentPage: 1,
-      fitMode: 'FIT_PAGE'
+      fitMode: 'FIT_PAGE',
+      rotation: 0
     });
   },
 
@@ -91,7 +100,6 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
       balloons: [...existing, ...toAdd]
     });
   },
-
 
   updateBalloonInStore: (updatedBalloon: Balloon) => {
     set({
@@ -139,9 +147,10 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
   setFitMode: (mode: FitMode) => set({ fitMode: mode }),
   setCurrentPage: (page: number) => set({ currentPage: page }),
   setZoomLevel: (zoom: number) => set({ zoomLevel: Math.max(0.2, Math.min(4.0, zoom)), fitMode: 'CUSTOM' }),
-  setOnlineCollaborators: (users: User[]) => set({ onlineCollaborators: users }),
+  rotateCanvas: () => set({ rotation: (get().rotation + 90) % 360 }),
+  setRotation: (rotation: number) => set({ rotation: rotation % 360 }),
+  setOnlineCollaborators: (users: InspectorUser[]) => set({ onlineCollaborators: users }),
   openManualFallbackModal: (coord) => set({ manualFallbackModalOpen: true, manualPendingCoord: coord }),
   closeManualFallbackModal: () => set({ manualFallbackModalOpen: false, manualPendingCoord: null }),
   setIsAutoExtracting: (loading: boolean) => set({ isAutoExtracting: loading })
 }));
-

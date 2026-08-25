@@ -1,6 +1,18 @@
 import React from 'react';
 import { useInspectionStore } from '../../store/useInspectionStore';
-import { MousePointer, CircleDot, Move, ZoomIn, ZoomOut, Maximize2, MoveHorizontal, ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
+import { 
+  MousePointer, 
+  CircleDot, 
+  Move, 
+  ZoomIn, 
+  ZoomOut, 
+  Maximize2, 
+  MoveHorizontal, 
+  RotateCw, 
+  ChevronLeft, 
+  ChevronRight, 
+  Trash2 
+} from 'lucide-react';
 
 interface ToolbarProps {
   totalPages: number;
@@ -14,6 +26,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({ totalPages }) => {
     setZoomLevel,
     fitMode,
     setFitMode,
+    rotation,
+    rotateCanvas,
     currentPage,
     setCurrentPage,
     selectedBalloonId,
@@ -102,9 +116,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({ totalPages }) => {
         </button>
       </div>
 
-      {/* Viewport Fit & Zoom Controls */}
+      {/* Viewport Fit, Rotate & Zoom Controls */}
       <div className="flex items-center gap-2">
-        {/* Fit Controls */}
+        {/* Fit & Rotate Controls */}
         <div className="flex items-center bg-slate-100 dark:bg-slate-950 p-1 rounded-xl border border-slate-200 dark:border-slate-800 gap-1">
           <button
             onClick={() => setFitMode('FIT_PAGE')}
@@ -130,6 +144,15 @@ export const Toolbar: React.FC<ToolbarProps> = ({ totalPages }) => {
           >
             <MoveHorizontal className="w-3 h-3" />
             <span className="hidden sm:inline font-mono text-[11px]">Fit Width</span>
+          </button>
+
+          <button
+            onClick={rotateCanvas}
+            className="px-2 py-0.5 rounded-lg text-xs font-bold flex items-center gap-1 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 transition-all"
+            title="Rotate Drawing 90° Clockwise"
+          >
+            <RotateCw className="w-3 h-3 text-cyan-600 dark:text-cyan-400" />
+            <span className="font-mono text-[11px]">{rotation}°</span>
           </button>
         </div>
 

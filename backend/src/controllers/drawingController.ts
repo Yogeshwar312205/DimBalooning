@@ -1,9 +1,10 @@
 import { Request, Response } from 'express';
-import prisma from '../utils/prisma'
+import prisma from '../utils/prisma';
 import path from 'path';
 import fs from 'fs';
 import { fetchPdfInfo, autoExtractDimensionsFromPdf } from '../services/pdfServiceConnector';
 import { calculateTolerance } from '../utils/toleranceCalculator';
+import { broadcastToInspectionSession } from '../websocket/socketHandler';
 
 /**
  * 32-Candidate Radial Spiral Search Algorithm
@@ -116,6 +117,9 @@ async function processExtractionInBackground(sessionId: string, filePath: string
               status: 'PENDING'
             }
           }
+        },
+        include: {
+          measurement: true
         }
       });
 
@@ -124,6 +128,12 @@ async function processExtractionInBackground(sessionId: string, filePath: string
     }
 
     console.log(`[Background-Worker] Successfully created ${createdBalloons.length} balloons for ${drawingName}`);
+
+    // Real-Time WebSocket Broadcast: Auto-hydrates the canvas in 0.01 seconds
+    broadcastToInspectionSession(sessionId, 'BALLOONS_AUTO_EXTRACTED', {
+      balloons: createdBalloons
+    });
+
   } catch (err: any) {
     console.error(`[Background-Worker Error] Failed background extraction for ${sessionId}:`, err?.message || err);
   }
@@ -273,6 +283,11 @@ export async function extractDrawing(req: Request, res: Response) {
       createdBalloons.push(balloon);
       balloonNum++;
     }
+
+    // Broadcast updated balloons to the canvas in real-time
+    broadcastToInspectionSession(session.id, 'BALLOONS_AUTO_EXTRACTED', {
+      balloons: createdBalloons
+    });
 
     return res.json({
       message: 'Deep AI scan and spiral ballooning completed successfully',

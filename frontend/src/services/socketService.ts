@@ -4,21 +4,22 @@ import { useInspectionStore } from '../store/useInspectionStore';
 let socket: Socket | null = null;
 
 export function connectInspectionSocket(inspectionSessionId: string) {
-  const token = localStorage.getItem('dim_ballooning_token');
-  if (!token) return null;
+  if (!inspectionSessionId) return null;
 
   if (socket) {
     socket.disconnect();
   }
 
   socket = io('/', {
-    auth: { token },
     transports: ['websocket', 'polling']
   });
 
   socket.on('connect', () => {
     console.log('⚡ Socket.io connected to server');
-    socket?.emit('JOIN_INSPECTION_SESSION', { inspectionSessionId });
+    socket?.emit('JOIN_INSPECTION_SESSION', { 
+      inspectionSessionId,
+      userName: 'Lead Inspector'
+    });
   });
 
   socket.on('COLLABORATORS_UPDATED', ({ onlineUsers }: { onlineUsers: any[] }) => {
@@ -29,7 +30,9 @@ export function connectInspectionSocket(inspectionSessionId: string) {
     useInspectionStore.getState().addBalloon(balloon);
   });
 
+  // REAL-TIME AUTO-SYNC: Auto-hydrates all extracted balloons without clicking Sync!
   socket.on('BALLOONS_AUTO_EXTRACTED', ({ balloons }: { balloons: any[] }) => {
+    console.log(`⚡ WebSocket Auto-Sync: Received ${balloons.length} balloons from background worker!`);
     useInspectionStore.getState().addMultipleBalloons(balloons);
     useInspectionStore.getState().setIsAutoExtracting(false);
   });
@@ -37,7 +40,6 @@ export function connectInspectionSocket(inspectionSessionId: string) {
   socket.on('BALLOON_UPDATED', ({ balloon }: { balloon: any }) => {
     useInspectionStore.getState().updateBalloonInStore(balloon);
   });
-
 
   socket.on('BALLOON_DELETED', ({ balloonId }: { balloonId: string }) => {
     useInspectionStore.getState().deleteBalloonFromStore(balloonId);

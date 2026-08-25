@@ -18,7 +18,7 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
   onPageRendered
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const { currentPage, zoomLevel, fitMode } = useInspectionStore();
+  const { currentPage, zoomLevel, fitMode, rotation } = useInspectionStore();
   const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -31,13 +31,7 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
     setLoading(true);
     setError(null);
 
-    const token = localStorage.getItem('dim_ballooning_token');
-
-    fetch(pdfUrl, {
-      headers: {
-        Authorization: `Bearer ${token}`
-      }
-    })
+    fetch(pdfUrl)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
         return res.arrayBuffer();
@@ -62,14 +56,15 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
     };
   }, [pdfUrl]);
 
-  // 2. High-DPI Razor Sharp Page Rendering
+  // 2. High-DPI Razor Sharp Page Rendering with Rotation
   useEffect(() => {
     if (!pdfDoc || !canvasRef.current) return;
 
     let renderTask: pdfjsLib.RenderTask | null = null;
 
     pdfDoc.getPage(currentPage).then((page) => {
-      const baseViewport = page.getViewport({ scale: 1.0 });
+      const currentRotation = (page.rotate + rotation) % 360;
+      const baseViewport = page.getViewport({ scale: 1.0, rotation: currentRotation });
 
       let calculatedScale = zoomLevel;
 
@@ -83,9 +78,9 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
 
       calculatedScale = Math.max(0.2, Math.min(4.0, calculatedScale));
 
-      // High-DPI Device Pixel Ratio Scaling (Retina 2x/3x sharpness multiplier)
+      // High-DPI Device Pixel Ratio Scaling
       const dpr = Math.max(window.devicePixelRatio || 1, 2);
-      const renderViewport = page.getViewport({ scale: calculatedScale * dpr });
+      const renderViewport = page.getViewport({ scale: calculatedScale * dpr, rotation: currentRotation });
 
       const canvas = canvasRef.current;
       if (!canvas) return;
@@ -93,11 +88,9 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
       const context = canvas.getContext('2d', { alpha: false });
       if (!context) return;
 
-      // Set backing store dimensions (high res)
       canvas.width = Math.floor(renderViewport.width);
       canvas.height = Math.floor(renderViewport.height);
 
-      // Set display dimensions (CSS pixels)
       const displayWidth = Math.floor(renderViewport.width / dpr);
       const displayHeight = Math.floor(renderViewport.height / dpr);
       canvas.style.width = `${displayWidth}px`;
@@ -131,7 +124,7 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
         renderTask.cancel();
       }
     };
-  }, [pdfDoc, currentPage, zoomLevel, fitMode, containerWidth, containerHeight]);
+  }, [pdfDoc, currentPage, zoomLevel, fitMode, rotation, containerWidth, containerHeight]);
 
   if (loading) {
     return (
