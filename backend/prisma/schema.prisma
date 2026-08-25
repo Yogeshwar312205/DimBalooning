@@ -7,31 +7,12 @@ generator client {
   provider = "prisma-client-js"
 }
 
-model User {
-  id           String   @id @default(uuid())
-  name         String
-  email        String   @unique
-  passwordHash String
-  role         String   @default("INSPECTOR") // ADMIN, INSPECTOR, ENGINEER, VIEWER
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  uploadedDrawings   Drawing[]
-  createdInspections InspectionSession[]
-  balloonsCreated    Balloon[]
-  measurementsEdited Measurement[]
-  collaborations     InspectionCollaborator[]
-  reportsGenerated   Report[]
-}
-
 model Drawing {
   id           String   @id @default(uuid())
   name         String
   filePath     String
   revision     String   @default("Rev A")
   pageCount    Int      @default(1)
-  uploadedById String
-  uploadedBy   User     @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -48,13 +29,10 @@ model InspectionSession {
   revision    String   @default("Rev A")
   batchNumber String
   status      String   @default("DRAFT") // DRAFT, IN_PROGRESS, COMPLETED, APPROVED
-  createdById String
-  createdBy   User     @relation(fields: [createdById], references: [id], onDelete: Cascade)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   balloons      Balloon[]
-  collaborators InspectionCollaborator[]
   reports       Report[]
 }
 
@@ -73,15 +51,13 @@ model Balloon {
   leaderEndX          Float?
   leaderEndY          Float?
   
-  // --- NEW AI EXTRACTION FIELDS ---
+  // --- AI EXTRACTION FIELDS ---
   isAiExtracted       Boolean           @default(false)
   nominalValue        Float?
   upperTolerance      Float?
   lowerTolerance      Float?
   unit                String            @default("mm")
   
-  createdById         String
-  createdBy           User              @relation(fields: [createdById], references: [id])
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
@@ -106,21 +82,8 @@ model Measurement {
   unit           String   @default("mm")
   status         String   @default("PENDING") // PASS, CHECK, FAIL, PENDING
   remarks        String?
-  updatedById    String?
-  updatedBy      User?    @relation(fields: [updatedById], references: [id])
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
-}
-
-model InspectionCollaborator {
-  id                  String            @id @default(uuid())
-  inspectionSessionId String
-  inspectionSession   InspectionSession @relation(fields: [inspectionSessionId], references: [id], onDelete: Cascade)
-  userId              String
-  user                User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  joinedAt            DateTime          @default(now())
-
-  @@unique([inspectionSessionId, userId])
 }
 
 model Report {
@@ -129,7 +92,5 @@ model Report {
   inspectionSession   InspectionSession @relation(fields: [inspectionSessionId], references: [id], onDelete: Cascade)
   type                String            // EXCEL, MARKED_PDF
   filePath            String
-  generatedById       String
-  generatedBy         User              @relation(fields: [generatedById], references: [id])
   createdAt           DateTime          @default(now())
 }
