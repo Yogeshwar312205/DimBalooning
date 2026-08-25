@@ -1,12 +1,11 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma'
 import path from 'path';
 import fs from 'fs';
 import { generateExcelReport } from '../services/excelReportService';
 import { requestMarkedUpPdf } from '../services/pdfServiceConnector';
 import { config } from '../config';
 
-const prisma = new PrismaClient();
 
 export async function generateExcel(req: Request, res: Response) {
   try {

@@ -1,11 +1,9 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma'
 import path from 'path';
 import fs from 'fs';
 import { fetchPdfInfo, autoExtractDimensionsFromPdf } from '../services/pdfServiceConnector';
 import { calculateTolerance } from '../utils/toleranceCalculator';
-
-const prisma = new PrismaClient();
 
 /**
  * 32-Candidate Radial Spiral Search Algorithm
