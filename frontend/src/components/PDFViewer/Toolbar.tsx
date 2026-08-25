@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useInspectionStore } from '../../store/useInspectionStore';
-import { MousePointer, CircleDot, Move, ZoomIn, ZoomOut, Maximize2, MoveHorizontal, ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
+import { MousePointer, CircleDot, Move, ZoomIn, ZoomOut, Maximize2, MoveHorizontal, ChevronLeft, ChevronRight, Trash2, Sparkles, Loader2 } from 'lucide-react';
+import api from '../../services/api';
+
 
 interface ToolbarProps {
   totalPages: number;
@@ -8,6 +10,7 @@ interface ToolbarProps {
 
 export const Toolbar: React.FC<ToolbarProps> = ({ totalPages }) => {
   const {
+    activeSession,
     activeTool,
     setActiveTool,
     zoomLevel,
@@ -17,67 +20,124 @@ export const Toolbar: React.FC<ToolbarProps> = ({ totalPages }) => {
     currentPage,
     setCurrentPage,
     selectedBalloonId,
-    deleteSelectedBalloon
+    deleteSelectedBalloon,
+    isAutoExtracting,
+    setIsAutoExtracting,
+    addMultipleBalloons
   } = useInspectionStore();
+
+  const [extractStatusMsg, setExtractStatusMsg] = useState<string | null>(null);
 
   const handleZoomIn = () => setZoomLevel(zoomLevel + 0.2);
   const handleZoomOut = () => setZoomLevel(zoomLevel - 0.2);
 
+  const handleAutoExtract = async () => {
+    if (!activeSession || isAutoExtracting) return;
+
+    setIsAutoExtracting(true);
+    setExtractStatusMsg('Running AI Vision Pipeline (Tiling & Extraction)...');
+
+    try {
+      const res = await api.post(`/balloons/auto-extract/${activeSession.id}`, {
+        pageNumber: currentPage,
+        clearExisting: false
+      });
+
+      if (res.data.balloons && res.data.balloons.length > 0) {
+        addMultipleBalloons(res.data.balloons);
+        setExtractStatusMsg(`Extracted ${res.data.balloons.length} dimensions!`);
+      } else {
+        setExtractStatusMsg('No new dimensions detected on this page.');
+      }
+
+      setTimeout(() => setExtractStatusMsg(null), 4000);
+    } catch (err: any) {
+      console.error('Failed auto-extraction:', err);
+      alert(err?.response?.data?.error || 'Failed to auto-extract dimensions. Please check API keys or connection.');
+    } finally {
+      setIsAutoExtracting(false);
+    }
+  };
+
   return (
     <div className="h-14 border-b border-slate-300 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 flex items-center justify-between shrink-0 transition-colors shadow-sm text-slate-900 dark:text-slate-100">
-      {/* Tool Selection */}
-      <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-950 p-1 rounded-xl border border-slate-300 dark:border-slate-800">
-        <button
-          onClick={() => setActiveTool('SELECT')}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-            activeTool === 'SELECT'
-              ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
-              : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
-          }`}
-          title="Select & Move Balloon"
-        >
-          <MousePointer className="w-4 h-4" />
-          <span>Select</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTool('BALLOON')}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-            activeTool === 'BALLOON'
-              ? 'bg-emerald-600 text-white shadow-md shadow-emerald-500/20'
-              : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
-          }`}
-          title="Click drawing to add balloon"
-        >
-          <CircleDot className="w-4 h-4" />
-          <span>Add Balloon</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTool('PAN')}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-            activeTool === 'PAN'
-              ? 'bg-purple-600 text-white shadow-md shadow-purple-500/20'
-              : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
-          }`}
-          title="Pan & Drag Drawing Canvas"
-        >
-          <Move className="w-4 h-4" />
-          <span>Pan / Move</span>
-        </button>
-
-        {/* Delete Balloon Button - Visible when a balloon is selected */}
-        {selectedBalloonId && (
+      {/* Tool Selection & AI Auto-Balloon */}
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-950 p-1 rounded-xl border border-slate-300 dark:border-slate-800">
           <button
-            onClick={() => deleteSelectedBalloon()}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold shadow-md shadow-rose-500/20 transition-all animate-pulse"
-            title="Delete Selected Balloon (Press Delete key)"
+            onClick={() => setActiveTool('SELECT')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              activeTool === 'SELECT'
+                ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
+                : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
+            }`}
+            title="Select & Move Balloon"
           >
-            <Trash2 className="w-4 h-4" />
-            <span>Delete Balloon</span>
+            <MousePointer className="w-4 h-4" />
+            <span>Select</span>
           </button>
+
+          <button
+            onClick={() => setActiveTool('BALLOON')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              activeTool === 'BALLOON'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-500/20'
+                : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
+            }`}
+            title="Click drawing to add balloon"
+          >
+            <CircleDot className="w-4 h-4" />
+            <span>Add Balloon</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTool('PAN')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              activeTool === 'PAN'
+                ? 'bg-purple-600 text-white shadow-md shadow-purple-500/20'
+                : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
+            }`}
+            title="Pan & Drag Drawing Canvas"
+          >
+            <Move className="w-4 h-4" />
+            <span>Pan / Move</span>
+          </button>
+
+          {/* Delete Balloon Button - Visible when a balloon is selected */}
+          {selectedBalloonId && (
+            <button
+              onClick={() => deleteSelectedBalloon()}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold shadow-md shadow-rose-500/20 transition-all animate-pulse"
+              title="Delete Selected Balloon (Press Delete key)"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>Delete Balloon</span>
+            </button>
+          )}
+        </div>
+
+        {/* AI Auto-Balloon Button */}
+        <button
+          onClick={handleAutoExtract}
+          disabled={isAutoExtracting}
+          className="flex items-center gap-2 px-3.5 py-1.5 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-xl text-xs font-bold shadow-md shadow-cyan-500/25 transition-all disabled:opacity-50 border border-cyan-400/30"
+          title="Run AI Vision Pipeline (Tiling + Gemini Vision + Deduplication)"
+        >
+          {isAutoExtracting ? (
+            <Loader2 className="w-4 h-4 animate-spin text-cyan-200" />
+          ) : (
+            <Sparkles className="w-4 h-4 text-cyan-200" />
+          )}
+          <span>{isAutoExtracting ? 'AI Extracting...' : 'Auto-Balloon (AI)'}</span>
+        </button>
+
+        {extractStatusMsg && (
+          <span className="text-[11px] font-mono text-cyan-600 dark:text-cyan-400 font-semibold animate-fade-in">
+            {extractStatusMsg}
+          </span>
         )}
       </div>
+
 
       {/* Page Navigation */}
       <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-950 px-3 py-1 rounded-xl border border-slate-300 dark:border-slate-800 text-xs font-mono">

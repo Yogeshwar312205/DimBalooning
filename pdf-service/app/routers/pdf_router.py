@@ -6,10 +6,16 @@ import shutil
 import tempfile
 from app.services.pdf_extractor import extract_text_at_coordinate, get_pdf_metadata
 from app.services.pdf_markup import generate_marked_up_pdf
+from app.services.vision_pipeline import execute_automated_vision_pipeline
 
 router = APIRouter(prefix="/api/pdf", tags=["PDF Processing"])
 
+class AutoExtractRequest(BaseModel):
+    filePath: str
+    pageNumber: int = 1
+
 class ExtractTextRequest(BaseModel):
+
     filePath: str
     pageNumber: int = 1
     normX: float
@@ -29,8 +35,20 @@ class MarkupPDFRequest(BaseModel):
     outputPdfPath: str
     balloons: List[BalloonMarkupItem]
 
+@router.post("/auto-extract")
+async def auto_extract(req: AutoExtractRequest):
+    if not os.path.exists(req.filePath):
+        raise HTTPException(status_code=404, detail=f"PDF file not found at {req.filePath}")
+    
+    try:
+        result = await execute_automated_vision_pipeline(req.filePath, req.pageNumber)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Automated vision extraction failed: {str(e)}")
+
 @router.post("/extract-text")
 def extract_text(req: ExtractTextRequest):
+
     if not os.path.exists(req.filePath):
         raise HTTPException(status_code=404, detail=f"PDF file not found at {req.filePath}")
     

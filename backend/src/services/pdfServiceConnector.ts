@@ -8,9 +8,61 @@ export interface ExtractDimensionParams {
   normY: float;
 }
 
-export type float = number;
+export interface AutoExtractParams {
+  filePath: string;
+  pageNumber?: number;
+}
+
+export interface AutoExtractResponse {
+  success: boolean;
+  pageNumber: number;
+  totalTiles: number;
+  activeTilesProcessed: number;
+  skippedBlankTiles: number[];
+  extractedCount: number;
+  processingTimeSeconds: number;
+  macroMetadata?: {
+    partNumber?: string;
+    partName?: string;
+    revision?: string;
+    generalTolerance?: string;
+    scale?: string;
+    unit?: string;
+  };
+  balloons: Array<{
+    balloonNumber: number;
+    x: number;
+    y: number;
+    leaderStartX?: number;
+    leaderStartY?: number;
+    dimensionText: string;
+    nominalValue: number | null;
+    upperTolerance: number | null;
+    lowerTolerance: number | null;
+    unit: string;
+    prefix: string;
+    type: string;
+  }>;
+  engineUsed: string;
+}
+
+export async function autoExtractDimensionsFromPdf(params: AutoExtractParams): Promise<AutoExtractResponse> {
+  try {
+    const response = await axios.post(`${config.pdfServiceUrl}/api/pdf/auto-extract`, {
+      filePath: params.filePath,
+      pageNumber: params.pageNumber || 1
+    }, {
+      timeout: 120000 // 2 minutes timeout for multi-tile AI extraction
+    });
+    return response.data;
+  } catch (error: any) {
+    console.error('PDF Service autoExtractDimensions error:', error?.response?.data || error.message);
+    throw new Error(error?.response?.data?.detail || error.message || 'Failed to auto-extract dimensions');
+  }
+}
 
 export async function extractDimensionFromPdf(params: ExtractDimensionParams) {
+
   try {
     const response = await axios.post(`${config.pdfServiceUrl}/api/pdf/extract-text`, {
       filePath: params.filePath,

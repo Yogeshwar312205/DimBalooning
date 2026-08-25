@@ -2,11 +2,128 @@ import { Response } from 'express';
 import { AuthRequest } from '../middleware/authMiddleware';
 import { PrismaClient } from '@prisma/client';
 import path from 'path';
-import { extractDimensionFromPdf } from '../services/pdfServiceConnector';
+import { extractDimensionFromPdf, autoExtractDimensionsFromPdf } from '../services/pdfServiceConnector';
 import { calculateTolerance } from '../utils/toleranceCalculator';
 import { broadcastToInspectionSession } from '../websocket/socketHandler';
 
 const prisma = new PrismaClient();
+
+export async function autoExtractBalloons(req: AuthRequest, res: Response) {
+  try {
+    const { sessionId } = req.params;
+    const { pageNumber = 1, clearExisting = false } = req.body;
+
+    const session = await prisma.inspectionSession.findUnique({
+      where: { id: sessionId },
+      include: { drawing: true }
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Inspection session not found' });
+    }
+
+    if (clearExisting) {
+      await prisma.balloon.deleteMany({
+        where: { inspectionSessionId: sessionId, pageNumber }
+      });
+    }
+
+    const drawingPath = path.resolve(session.drawing.filePath);
+
+    // Call Python Vision Pipeline
+    const extractionResult = await autoExtractDimensionsFromPdf({
+      filePath: drawingPath,
+      pageNumber
+    });
+
+    const existingBalloons = await prisma.balloon.findMany({
+      where: { inspectionSessionId: sessionId },
+      select: { balloonNumber: true }
+    });
+
+    let currentBalloonNum = existingBalloons.length > 0
+      ? Math.max(...existingBalloons.map(b => b.balloonNumber)) + 1
+      : 1;
+
+    const createdBalloons: any[] = [];
+
+    // Save each extracted dimension into DB inside Prisma transaction
+    for (const item of extractionResult.balloons) {
+      const nominal = item.nominalValue !== undefined ? item.nominalValue : null;
+      const upperTol = item.upperTolerance !== undefined ? item.upperTolerance : null;
+      const lowerTol = item.lowerTolerance !== undefined ? item.lowerTolerance : null;
+      const initialTolerance = calculateTolerance(nominal, upperTol, lowerTol, null);
+
+      const balloon = await prisma.balloon.create({
+        data: {
+          inspectionSessionId: sessionId,
+          balloonNumber: currentBalloonNum,
+          pageNumber,
+          x: item.x,
+          y: item.y,
+          width: 0.04,
+          height: 0.04,
+          leaderStartX: item.leaderStartX ?? null,
+          leaderStartY: item.leaderStartY ?? null,
+          createdById: req.user!.id,
+          measurement: {
+            create: {
+              dimensionText: item.dimensionText || `Dim #${currentBalloonNum}`,
+              nominalValue: nominal,
+              upperTolerance: upperTol,
+              lowerTolerance: lowerTol,
+              lowerLimit: initialTolerance.lowerLimit,
+              upperLimit: initialTolerance.upperLimit,
+              actualValue: null,
+              unit: item.unit || 'mm',
+              status: 'PENDING'
+            }
+          }
+        },
+        include: {
+          measurement: true,
+          createdBy: { select: { id: true, name: true } }
+        }
+      });
+
+      createdBalloons.push(balloon);
+      currentBalloonNum++;
+    }
+
+    // Broadcast WebSocket event to all inspectors in the session
+    broadcastToInspectionSession(sessionId, 'BALLOONS_AUTO_EXTRACTED', {
+      sessionId,
+      balloons: createdBalloons,
+      extractionSummary: {
+        totalTiles: extractionResult.totalTiles,
+        activeTiles: extractionResult.activeTilesProcessed,
+        skippedBlankTiles: extractionResult.skippedBlankTiles,
+        extractedCount: createdBalloons.length,
+        processingTimeSeconds: extractionResult.processingTimeSeconds,
+        engineUsed: extractionResult.engineUsed,
+        macroMetadata: extractionResult.macroMetadata
+      }
+    });
+
+    return res.status(200).json({
+      message: `Successfully auto-extracted ${createdBalloons.length} dimensions using ${extractionResult.engineUsed}`,
+      balloons: createdBalloons,
+      extractionSummary: {
+        totalTiles: extractionResult.totalTiles,
+        activeTiles: extractionResult.activeTilesProcessed,
+        skippedBlankTiles: extractionResult.skippedBlankTiles,
+        extractedCount: createdBalloons.length,
+        processingTimeSeconds: extractionResult.processingTimeSeconds,
+        engineUsed: extractionResult.engineUsed,
+        macroMetadata: extractionResult.macroMetadata
+      }
+    });
+  } catch (error: any) {
+    console.error('Auto-extract balloons error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to auto-extract dimensions from drawing' });
+  }
+}
+
 
 export async function createBalloon(req: AuthRequest, res: Response) {
   try {

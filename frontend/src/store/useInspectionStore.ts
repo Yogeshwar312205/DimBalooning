@@ -25,9 +25,12 @@ interface InspectionStore {
   onlineCollaborators: User[];
   manualFallbackModalOpen: boolean;
   manualPendingCoord: ManualPendingCoord | null;
+  isAutoExtracting: boolean;
 
   setSession: (session: InspectionSession) => void;
+  setBalloons: (balloons: Balloon[]) => void;
   addBalloon: (balloon: Balloon) => void;
+  addMultipleBalloons: (balloons: Balloon[]) => void;
   updateBalloonInStore: (balloon: Balloon) => void;
   deleteBalloonFromStore: (balloonId: string) => void;
   deleteSelectedBalloon: () => Promise<void>;
@@ -40,7 +43,9 @@ interface InspectionStore {
   setOnlineCollaborators: (users: User[]) => void;
   openManualFallbackModal: (coord: ManualPendingCoord) => void;
   closeManualFallbackModal: () => void;
+  setIsAutoExtracting: (loading: boolean) => void;
 }
+
 
 export const useInspectionStore = create<InspectionStore>((set, get) => ({
   activeSession: null,
@@ -53,6 +58,7 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
   onlineCollaborators: [],
   manualFallbackModalOpen: false,
   manualPendingCoord: null,
+  isAutoExtracting: false,
 
   setSession: (session: InspectionSession) => {
     set({
@@ -64,6 +70,10 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
     });
   },
 
+  setBalloons: (balloons: Balloon[]) => {
+    set({ balloons });
+  },
+
   addBalloon: (balloon: Balloon) => {
     const existing = get().balloons;
     if (existing.some((b) => b.id === balloon.id)) return;
@@ -72,6 +82,16 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
       selectedBalloonId: balloon.id
     });
   },
+
+  addMultipleBalloons: (newBalloons: Balloon[]) => {
+    const existing = get().balloons;
+    const existingIds = new Set(existing.map((b) => b.id));
+    const toAdd = newBalloons.filter((b) => !existingIds.has(b.id));
+    set({
+      balloons: [...existing, ...toAdd]
+    });
+  },
+
 
   updateBalloonInStore: (updatedBalloon: Balloon) => {
     set({
@@ -121,5 +141,7 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
   setZoomLevel: (zoom: number) => set({ zoomLevel: Math.max(0.2, Math.min(4.0, zoom)), fitMode: 'CUSTOM' }),
   setOnlineCollaborators: (users: User[]) => set({ onlineCollaborators: users }),
   openManualFallbackModal: (coord) => set({ manualFallbackModalOpen: true, manualPendingCoord: coord }),
-  closeManualFallbackModal: () => set({ manualFallbackModalOpen: false, manualPendingCoord: null })
+  closeManualFallbackModal: () => set({ manualFallbackModalOpen: false, manualPendingCoord: null }),
+  setIsAutoExtracting: (loading: boolean) => set({ isAutoExtracting: loading })
 }));
+

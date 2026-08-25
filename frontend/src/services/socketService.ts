@@ -29,9 +29,15 @@ export function connectInspectionSocket(inspectionSessionId: string) {
     useInspectionStore.getState().addBalloon(balloon);
   });
 
+  socket.on('BALLOONS_AUTO_EXTRACTED', ({ balloons }: { balloons: any[] }) => {
+    useInspectionStore.getState().addMultipleBalloons(balloons);
+    useInspectionStore.getState().setIsAutoExtracting(false);
+  });
+
   socket.on('BALLOON_UPDATED', ({ balloon }: { balloon: any }) => {
     useInspectionStore.getState().updateBalloonInStore(balloon);
   });
+
 
   socket.on('BALLOON_DELETED', ({ balloonId }: { balloonId: string }) => {
     useInspectionStore.getState().deleteBalloonFromStore(balloonId);

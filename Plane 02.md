@@ -1,0 +1,17 @@
+Here is the detailed breakdown of how API costs and rate limits affect our overlapping grid architecture, along with the best model to use right now to build this prototype completely for free.1. The Cost Reality: True Free vs. Pay-to-PlayWhen building a prototype, you want to avoid attaching a credit card or dealing with surprise bills if your async loop runs out of control.OpenAI (GPT-4o Mini): While it is very cheap in production ($0.15 per 1 million input tokens), OpenAI does not have a "true free" API tier for developers. You generally have to preload at least $5 into the account to unlock Tier 1 API access.Groq (Llama 3.2 Vision / Qwen Vision): Groq runs open-source models on custom hardware at blazing speeds. They offer a fantastic free tier that does not require a credit card, granting around 30 Requests Per Minute (RPM).Google AI Studio (Gemini 1.5 Flash / 2.0 Flash): Google provides a 100% free tier for developers. As long as you do not enable billing on your Google Cloud project, you can use the API for free.2. Understanding Rate Limits (The 429 Error Trap)API providers restrict how much you can use their systems to prevent spam. The most critical metric for our architecture is RPM (Requests Per Minute).If you remember, our architecture requires 10 API calls per drawing (1 Macro pass + 9 Micro grid tiles).The Gemini Free Tier Limit: Gemini provides 10 to 15 RPM (depending on the specific Flash model) on its free tier.The Trap: If you upload a drawing, your backend fires 10 requests. You have 5 requests left for that minute. If you try to upload a second drawing 30 seconds later, your system fires 10 more requests. You hit 20 requests in under a minute, exceeding the 15 RPM limit. The API will crash and return an HTTP 429: Rate Limit Exceeded error.3. AI Suggestion: Which Model to Use?For this specific prototype, you should use Google Gemini 1.5 Flash via Google AI Studio.Why Gemini 1.5 Flash?Zero Cost: It is completely free for prototyping.Top-Tier OCR: Gemini models are notoriously excellent at reading dense text and extracting structured JSON data from complex images.Massive Capacity: It offers up to a 1-million-token context window and up to 1,500 Requests Per Day (RPD) on the free tier.The Backup Plan:If you find the 15 RPM limit too restrictive while testing, switch your API keys to Groq using their multimodal models (like Qwen 3.6 27B Vision). Groq's free tier gives you a higher threshold of 30 RPM, allowing you to process about three full drawings per minute without hitting rate limits.4. Technical Fix: The Async SemaphoreTo ensure your 10 API calls don't trigger Google's burst limits (hitting them with 10 images in the exact same millisecond), you must implement an Async Semaphore in your backend code.A semaphore acts like a bouncer at a club. Instead of letting all 9 micro-grids hit the API at once, it only lets a few through at a time:Pythonimport asyncio
+
+# Limit to 3 concurrent API calls at a time to avoid burst rate limits
+semaphore = asyncio.Semaphore(3) 
+
+async def process_tile(tile_image, grid_id):
+    async with semaphore:
+        # 1. This block waits if 3 calls are already running
+        # 2. Call the Gemini API here
+        # 3. Return the JSON tolerances
+        pass
+
+async def process_full_drawing():
+    # Gather all 9 tiles and run them through the semaphore
+    tasks = [process_tile(tile, i) for i, tile in enumerate(nine_tiles)]
+    results = await asyncio.gather(*tasks)
+    return results
