@@ -243,55 +243,76 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
         detected = []
         seen_coords = set()
 
-        # 1. Stage 1: Vector Text Extraction via PyMuPDF
-        blocks = page.get_text("blocks")
-        for b in blocks:
-            text = b[4].strip()
-            if not text:
+        # 1. Stage 1: Vector Text Extraction via PyMuPDF (Word-level precision)
+        words = page.get_text("words")
+        lines_dict = {}
+        for w in words:
+            key = (w[5], w[6])  # (block_no, line_no)
+            if key not in lines_dict:
+                lines_dict[key] = []
+            lines_dict[key].append(w)
+
+        rot_matrix = page.rotation_matrix
+
+        for key, line_words in lines_dict.items():
+            clean_line = " ".join(w[4] for w in line_words).strip()
+            if not clean_line:
                 continue
 
-            lines = text.split('\n')
-            for line in lines:
-                clean_line = line.strip()
-                if not clean_line:
+            parsed = parse_dimension_string(clean_line)
+            if parsed and parsed.get("found"):
+                x0 = min(w[0] for w in line_words)
+                y0 = min(w[1] for w in line_words)
+                x1 = max(w[2] for w in line_words)
+                y1 = max(w[3] for w in line_words)
+
+                b_rect = fitz.Rect(x0, y0, x1, y1)
+                if page.rotation != 0:
+                    b_rect = b_rect * rot_matrix
+
+                cx = (b_rect.x0 + b_rect.x1) / 2.0
+                cy = (b_rect.y0 + b_rect.y1) / 2.0
+                norm_x = round(cx / width, 4)
+                norm_y = round(cy / height, 4)
+
+                # Skip out-of-bounds text items (e.g. margin annotations) individually
+                if norm_x < 0.0 or norm_y < 0.0 or norm_x > 1.0 or norm_y > 1.0:
                     continue
 
-                parsed = parse_dimension_string(clean_line)
-                if parsed and parsed.get("found"):
-                    x0, y0, x1, y1 = b[0], b[1], b[2], b[3]
-                    cx = (x0 + x1) / 2.0
-                    cy = (y0 + y1) / 2.0
-                    norm_x = round(cx / width, 4)
-                    norm_y = round(cy / height, 4)
+                coord_key = (round(norm_x, 3), round(norm_y, 3))
+                if coord_key in seen_coords:
+                    continue
+                seen_coords.add(coord_key)
 
-                    coord_key = (round(norm_x, 2), round(norm_y, 2))
-                    if coord_key in seen_coords:
-                        continue
-                    seen_coords.add(coord_key)
+                detected.append({
+                    "normX": norm_x,
+                    "normY": norm_y,
+                    "bbox": {
+                        "x0": round(b_rect.x0 / width, 4),
+                        "y0": round(b_rect.y0 / height, 4),
+                        "x1": round(b_rect.x1 / width, 4),
+                        "y1": round(b_rect.y1 / height, 4)
+                    },
+                    "rawText": parsed["rawText"],
+                    "nominalValue": parsed["nominalValue"],
+                    "upperTolerance": parsed["upperTolerance"],
+                    "lowerTolerance": parsed["lowerTolerance"],
+                    "unit": parsed["unit"],
+                    "prefix": parsed.get("prefix", ""),
+                    "extractionMode": "VECTOR_AUTOMATIC"
+                })
 
-                    detected.append({
-                        "normX": norm_x,
-                        "normY": norm_y,
-                        "rawText": parsed["rawText"],
-                        "nominalValue": parsed["nominalValue"],
-                        "upperTolerance": parsed["upperTolerance"],
-                        "lowerTolerance": parsed["lowerTolerance"],
-                        "unit": parsed["unit"],
-                        "prefix": parsed.get("prefix", ""),
-                        "extractionMode": "VECTOR_AUTOMATIC"
-                    })
-
-        # 2. Stage 2: OCR Fallback for Scanned / Raster Image PDF Drawings
+        # 2. Stage 2: OCR Extraction for Scanned / Raster Image PDF Drawings (Fallback only if 0 vector items)
         if len(detected) == 0:
             reader = get_ocr_reader()
             if reader:
-                pix = page.get_pixmap(dpi=120)
+                pix = page.get_pixmap(dpi=150)
                 try:
                     from PIL import Image
                     import io
                     pil_img = Image.open(io.BytesIO(pix.tobytes("png")))
                     w, h = pil_img.size
-                    max_dim = 1100
+                    max_dim = 1800
                     if max(w, h) > max_dim:
                         scale = max_dim / float(max(w, h))
                         new_w, new_h = int(w * scale), int(h * scale)
@@ -309,7 +330,7 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                 ocr_results = reader.readtext(img_bytes)
 
                 for bbox, text, prob in ocr_results:
-                    if prob < 0.3 or not text or not any(char.isdigit() for char in text):
+                    if prob < 0.20 or not text or not any(char.isdigit() for char in text):
                         continue
 
                     parsed = parse_dimension_string(text)
@@ -317,14 +338,16 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                         # bbox format: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
                         xs = [p[0] for p in bbox]
                         ys = [p[1] for p in bbox]
+                        min_x, max_x = min(xs), max(xs)
+                        min_y, max_y = min(ys), max(ys)
                         cx = sum(xs) / len(xs)
                         cy = sum(ys) / len(ys)
 
                         norm_x = round(float(cx) / img_w, 4)
                         norm_y = round(float(cy) / img_h, 4)
 
-                        # Skip title block area & bottom revision table
-                        if (norm_x > 0.70 and norm_y > 0.75) or norm_y > 0.85:
+                        # Skip title block area (bottom-right corner)
+                        if norm_x > 0.60 and norm_y > 0.80:
                             continue
 
                         coord_key = (round(norm_x, 2), round(norm_y, 2))
@@ -335,6 +358,12 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                         detected.append({
                             "normX": norm_x,
                             "normY": norm_y,
+                            "bbox": {
+                                "x0": round(float(min_x) / img_w, 4),
+                                "y0": round(float(min_y) / img_h, 4),
+                                "x1": round(float(max_x) / img_w, 4),
+                                "y1": round(float(max_y) / img_h, 4)
+                            },
                             "rawText": parsed["rawText"],
                             "nominalValue": parsed["nominalValue"],
                             "upperTolerance": parsed["upperTolerance"],

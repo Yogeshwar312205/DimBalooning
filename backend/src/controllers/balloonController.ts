@@ -201,36 +201,76 @@ export async function autoDetectBalloons(req: AuthRequest, res: Response) {
     }
 
     const existingBalloons = await prisma.balloon.findMany({
-      where: { inspectionSessionId },
-      select: { balloonNumber: true, x: true, y: true }
+      where: { inspectionSessionId, pageNumber },
+      select: { balloonNumber: true, x: true, y: true, leaderStartX: true, leaderStartY: true }
     });
+
+    // Track placed balloon circle positions and anchor positions to avoid overlap
+    const placedPositions: Array<{ x: number; y: number }> = existingBalloons.map(b => ({ x: b.x, y: b.y }));
+    const placedAnchors: Array<{ x: number; y: number }> = existingBalloons.map(b => ({
+      x: b.leaderStartX ?? b.x,
+      y: b.leaderStartY ?? b.y
+    }));
 
     let currentMaxNum = existingBalloons.length > 0 ? Math.max(...existingBalloons.map(b => b.balloonNumber)) : 0;
     const createdBalloons = [];
 
     for (const item of extractedData.items) {
-      const isDuplicate = existingBalloons.some(
-        b => Math.abs(b.x - item.normX) < 0.03 && Math.abs(b.y - item.normY) < 0.03
-      );
-      if (isDuplicate) continue;
-
-      currentMaxNum++;
       const targetX = item.normX;
       const targetY = item.normY;
-      // Smart offset for balloon circle: shift right if on left side, shift left if on right side
-      const offsetX = targetX < 0.85 ? 0.04 : -0.04;
-      const offsetY = targetY > 0.15 ? -0.03 : 0.03;
 
-      const balloonX = Math.max(0.04, Math.min(0.96, targetX + offsetX));
-      const balloonY = Math.max(0.04, Math.min(0.96, targetY + offsetY));
+      // 1. Spatial Proximity Duplicate Check (Merge only if anchor position is within 0.010 distance, ~1% page bounds)
+      const isDuplicate = placedAnchors.some(
+        anchor => Math.hypot(anchor.x - targetX, anchor.y - targetY) < 0.010
+      );
+      if (isDuplicate) continue;
+      placedAnchors.push({ x: targetX, y: targetY });
+
+      // 2. Candidate Spiral Collision Avoidance Search for Balloon Circle Position
+      const candidateRadii = [0.04, 0.065, 0.09, 0.12];
+      const angles = [
+        -Math.PI / 4,      // Top-Right
+        -3 * Math.PI / 4,  // Top-Left
+        Math.PI / 4,       // Bottom-Right
+        3 * Math.PI / 4,   // Bottom-Left
+        -Math.PI / 2,      // Top
+        0,                 // Right
+        Math.PI / 2,       // Bottom
+        Math.PI            // Left
+      ];
+
+      let chosenX = Math.max(0.03, Math.min(0.97, targetX + 0.04));
+      let chosenY = Math.max(0.03, Math.min(0.97, targetY - 0.03));
+      let foundFree = false;
+
+      for (const r of candidateRadii) {
+        for (const angle of angles) {
+          const candX = Math.max(0.03, Math.min(0.97, targetX + r * Math.cos(angle)));
+          const candY = Math.max(0.03, Math.min(0.97, targetY + r * Math.sin(angle)));
+
+          const collides = placedPositions.some(
+            pos => Math.hypot(pos.x - candX, pos.y - candY) < 0.035
+          );
+
+          if (!collides) {
+            chosenX = candX;
+            chosenY = candY;
+            foundFree = true;
+            break;
+          }
+        }
+        if (foundFree) break;
+      }
+
+      placedPositions.push({ x: chosenX, y: chosenY });
 
       const balloon = await prisma.balloon.create({
         data: {
           inspectionSessionId,
-          balloonNumber: currentMaxNum,
+          balloonNumber: currentMaxNum + 1,
           pageNumber,
-          x: balloonX,
-          y: balloonY,
+          x: chosenX,
+          y: chosenY,
           leaderStartX: targetX,
           leaderStartY: targetY,
           width: 0.04,
@@ -238,6 +278,7 @@ export async function autoDetectBalloons(req: AuthRequest, res: Response) {
           createdById: userId
         }
       });
+      currentMaxNum++;
 
       const nominal = item.nominalValue ?? null;
       const upperTol = item.upperTolerance ?? null;
@@ -284,7 +325,12 @@ export async function autoDetectBalloons(req: AuthRequest, res: Response) {
     return res.status(201).json({
       message: `Successfully auto-detected ${createdBalloons.length} dimension balloons`,
       count: createdBalloons.length,
-      balloons: createdBalloons
+      balloons: createdBalloons,
+      stats: {
+        totalExtractedCandidates: extractedData.items.length,
+        createdBalloonsCount: createdBalloons.length,
+        skippedDuplicatesCount: Math.max(0, extractedData.items.length - createdBalloons.length)
+      }
     });
   } catch (error: any) {
     console.error('Auto detect balloons error:', error);

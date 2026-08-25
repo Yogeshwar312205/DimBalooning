@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { fabric } from 'fabric';
 import { useInspectionStore } from '../../store/useInspectionStore';
 import { Balloon } from '../../types/balloon';
@@ -34,7 +34,9 @@ export const CanvasOverlay: React.FC<CanvasOverlayProps> = ({ width, height }) =
     openManualFallbackModal
   } = useInspectionStore();
 
-  // Keyboard shortcut: Delete or Backspace key to delete selected balloon
+  const [showDebugOverlay, setShowDebugOverlay] = useState<boolean>(false);
+
+  // Keyboard shortcut: Delete key to delete selected balloon; 'D' key to toggle debug overlay
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't delete if user is typing inside an input field
@@ -45,6 +47,8 @@ export const CanvasOverlay: React.FC<CanvasOverlayProps> = ({ width, height }) =
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBalloonId) {
         e.preventDefault();
         deleteSelectedBalloon();
+      } else if (e.key === 'd' || e.key === 'D') {
+        setShowDebugOverlay((prev) => !prev);
       }
     };
 
@@ -219,12 +223,12 @@ export const CanvasOverlay: React.FC<CanvasOverlayProps> = ({ width, height }) =
       const dist = Math.hypot(lx - px, ly - py);
 
       if (dist > 2) {
-        // Target dot at exact coordinate on drawing
+        // Target dot at exact coordinate on drawing (GREEN if debug mode active)
         targetDot = new fabric.Circle({
           left: lx,
           top: ly,
-          radius: 3.5,
-          fill: colors.border,
+          radius: showDebugOverlay ? 5 : 3.5,
+          fill: showDebugOverlay ? '#22c55e' : colors.border,
           originX: 'center',
           originY: 'center',
           selectable: false,
@@ -242,6 +246,23 @@ export const CanvasOverlay: React.FC<CanvasOverlayProps> = ({ width, height }) =
 
         fc.add(targetDot);
         fc.add(leaderLine);
+
+        // Debug Mode: Draw RED bounding box around text anchor
+        if (showDebugOverlay) {
+          const debugRect = new fabric.Rect({
+            left: lx - 15,
+            top: ly - 10,
+            width: 30,
+            height: 20,
+            fill: 'transparent',
+            stroke: '#ef4444',
+            strokeWidth: 1.5,
+            strokeDashArray: [3, 3],
+            selectable: false,
+            evented: false
+          });
+          fc.add(debugRect);
+        }
       }
 
       // Circle
