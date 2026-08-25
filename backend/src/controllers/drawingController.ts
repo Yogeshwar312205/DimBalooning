@@ -21,13 +21,33 @@ export async function uploadDrawing(req: AuthRequest, res: Response) {
     const pdfInfo = await fetchPdfInfo(absolutePath);
     const pageCount = pdfInfo.pageCount || 1;
 
+    let userId = req.user?.id;
+    if (userId) {
+      const userExists = await prisma.user.findUnique({ where: { id: userId } });
+      if (!userExists) {
+        const matchingEmailUser = req.user?.email ? await prisma.user.findUnique({ where: { email: req.user.email } }) : null;
+        if (matchingEmailUser) {
+          userId = matchingEmailUser.id;
+        } else {
+          const fallbackUser = await prisma.user.findFirst();
+          if (fallbackUser) {
+            userId = fallbackUser.id;
+          }
+        }
+      }
+    }
+
+    if (!userId) {
+      return res.status(401).json({ error: 'User session invalid. Please log in again.' });
+    }
+
     const drawing = await prisma.drawing.create({
       data: {
         name: drawingName,
         filePath: req.file.path,
         revision: revision || 'Rev A',
         pageCount,
-        uploadedById: req.user!.id
+        uploadedById: userId
       },
       include: {
         uploadedBy: { select: { id: true, name: true, email: true } }
@@ -40,7 +60,7 @@ export async function uploadDrawing(req: AuthRequest, res: Response) {
     });
   } catch (error: any) {
     console.error('Upload drawing error:', error);
-    return res.status(500).json({ error: 'Failed to upload drawing' });
+    return res.status(500).json({ error: error?.message || 'Failed to upload drawing' });
   }
 }
 

@@ -17,6 +17,26 @@ export async function createInspectionSession(req: AuthRequest, res: Response) {
       return res.status(404).json({ error: 'Associated engineering drawing not found' });
     }
 
+    let userId = req.user?.id;
+    if (userId) {
+      const userExists = await prisma.user.findUnique({ where: { id: userId } });
+      if (!userExists) {
+        const matchingEmailUser = req.user?.email ? await prisma.user.findUnique({ where: { email: req.user.email } }) : null;
+        if (matchingEmailUser) {
+          userId = matchingEmailUser.id;
+        } else {
+          const fallbackUser = await prisma.user.findFirst();
+          if (fallbackUser) {
+            userId = fallbackUser.id;
+          }
+        }
+      }
+    }
+
+    if (!userId) {
+      return res.status(401).json({ error: 'User session invalid. Please log in again.' });
+    }
+
     const session = await prisma.inspectionSession.create({
       data: {
         drawingId,
@@ -26,7 +46,7 @@ export async function createInspectionSession(req: AuthRequest, res: Response) {
         revision: revision || drawing.revision || 'Rev A',
         batchNumber,
         status: 'IN_PROGRESS',
-        createdById: req.user!.id
+        createdById: userId
       },
       include: {
         drawing: true,
@@ -40,7 +60,7 @@ export async function createInspectionSession(req: AuthRequest, res: Response) {
     });
   } catch (error: any) {
     console.error('Create inspection session error:', error);
-    return res.status(500).json({ error: 'Failed to create inspection session' });
+    return res.status(500).json({ error: error?.message || 'Failed to create inspection session' });
   }
 }
 

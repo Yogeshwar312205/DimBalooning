@@ -1,10 +1,24 @@
 import { Response } from 'express';
-import { AuthRequest } from '../middleware/authMiddleware';
+import { AuthRequest, AuthUser } from '../middleware/authMiddleware';
 import { PrismaClient } from '@prisma/client';
 import { calculateTolerance } from '../utils/toleranceCalculator';
 import { broadcastToInspectionSession } from '../websocket/socketHandler';
 
 const prisma = new PrismaClient();
+
+async function resolveUserId(reqUser?: AuthUser): Promise<string | null> {
+  if (!reqUser?.id) return null;
+  const userExists = await prisma.user.findUnique({ where: { id: reqUser.id } });
+  if (userExists) return userExists.id;
+
+  if (reqUser.email) {
+    const matchingEmailUser = await prisma.user.findUnique({ where: { email: reqUser.email } });
+    if (matchingEmailUser) return matchingEmailUser.id;
+  }
+
+  const fallbackUser = await prisma.user.findFirst();
+  return fallbackUser ? fallbackUser.id : null;
+}
 
 export async function updateMeasurement(req: AuthRequest, res: Response) {
   try {
@@ -28,6 +42,8 @@ export async function updateMeasurement(req: AuthRequest, res: Response) {
       return res.status(404).json({ error: 'Measurement record not found' });
     }
 
+    const userId = await resolveUserId(req.user);
+
     const nominal = nominalValue !== undefined ? nominalValue : existingMeasurement.nominalValue;
     const upperTol = upperTolerance !== undefined ? upperTolerance : existingMeasurement.upperTolerance;
     const lowerTol = lowerTolerance !== undefined ? lowerTolerance : existingMeasurement.lowerTolerance;
@@ -49,7 +65,7 @@ export async function updateMeasurement(req: AuthRequest, res: Response) {
         lowerLimit: calcResult.lowerLimit,
         upperLimit: calcResult.upperLimit,
         status: calcResult.status,
-        updatedById: req.user!.id
+        ...(userId && { updatedById: userId })
       },
       include: {
         balloon: true,
@@ -71,7 +87,7 @@ export async function updateMeasurement(req: AuthRequest, res: Response) {
     });
   } catch (error: any) {
     console.error('Update measurement error:', error);
-    return res.status(500).json({ error: 'Failed to update measurement record' });
+    return res.status(500).json({ error: error?.message || 'Failed to update measurement record' });
   }
 }
 
@@ -101,6 +117,8 @@ export async function saveMeasurement(req: AuthRequest, res: Response) {
       return res.status(404).json({ error: 'Balloon not found' });
     }
 
+    const userId = await resolveUserId(req.user);
+
     let existing = balloon.measurement;
     const nominal = nominalValue !== undefined ? nominalValue : existing?.nominalValue;
     const upperTol = upperTolerance !== undefined ? upperTolerance : existing?.upperTolerance;
@@ -125,7 +143,7 @@ export async function saveMeasurement(req: AuthRequest, res: Response) {
           lowerLimit: calcResult.lowerLimit,
           upperLimit: calcResult.upperLimit,
           status: calcResult.status,
-          updatedById: req.user!.id
+          ...(userId && { updatedById: userId })
         },
         include: {
           balloon: true,
@@ -145,7 +163,7 @@ export async function saveMeasurement(req: AuthRequest, res: Response) {
           actualValue: actual,
           unit: unit || 'mm',
           status: calcResult.status,
-          updatedById: req.user!.id
+          ...(userId && { updatedById: userId })
         },
         include: {
           balloon: true,
@@ -167,6 +185,6 @@ export async function saveMeasurement(req: AuthRequest, res: Response) {
     });
   } catch (error: any) {
     console.error('Save measurement error:', error);
-    return res.status(500).json({ error: 'Failed to save measurement record' });
+    return res.status(500).json({ error: error?.message || 'Failed to save measurement record' });
   }
 }

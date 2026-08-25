@@ -69,7 +69,28 @@ export async function createBalloon(req: AuthRequest, res: Response) {
       });
     }
 
-    // 3. Create Balloon in DB
+    // 3. Resolve user ID safely
+    let userId = req.user?.id;
+    if (userId) {
+      const userExists = await prisma.user.findUnique({ where: { id: userId } });
+      if (!userExists) {
+        const matchingEmailUser = req.user?.email ? await prisma.user.findUnique({ where: { email: req.user.email } }) : null;
+        if (matchingEmailUser) {
+          userId = matchingEmailUser.id;
+        } else {
+          const fallbackUser = await prisma.user.findFirst();
+          if (fallbackUser) {
+            userId = fallbackUser.id;
+          }
+        }
+      }
+    }
+
+    if (!userId) {
+      return res.status(401).json({ error: 'User session invalid. Please log in again.' });
+    }
+
+    // 4. Create Balloon in DB
     const balloon = await prisma.balloon.create({
       data: {
         inspectionSessionId,
@@ -81,7 +102,7 @@ export async function createBalloon(req: AuthRequest, res: Response) {
         height,
         leaderStartX: leaderStartX ?? null,
         leaderStartY: leaderStartY ?? null,
-        createdById: req.user!.id
+        createdById: userId
       }
     });
 

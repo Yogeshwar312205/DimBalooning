@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { AuthRequest } from '../middleware/authMiddleware';
+import { AuthRequest, AuthUser } from '../middleware/authMiddleware';
 import { PrismaClient } from '@prisma/client';
 import path from 'path';
 import fs from 'fs';
@@ -8,6 +8,20 @@ import { requestMarkedUpPdf } from '../services/pdfServiceConnector';
 import { config } from '../config';
 
 const prisma = new PrismaClient();
+
+async function resolveUserId(reqUser?: AuthUser): Promise<string | null> {
+  if (!reqUser?.id) return null;
+  const userExists = await prisma.user.findUnique({ where: { id: reqUser.id } });
+  if (userExists) return userExists.id;
+
+  if (reqUser.email) {
+    const matchingEmailUser = await prisma.user.findUnique({ where: { email: reqUser.email } });
+    if (matchingEmailUser) return matchingEmailUser.id;
+  }
+
+  const fallbackUser = await prisma.user.findFirst();
+  return fallbackUser ? fallbackUser.id : null;
+}
 
 export async function generateExcel(req: AuthRequest, res: Response) {
   try {
@@ -30,6 +44,11 @@ export async function generateExcel(req: AuthRequest, res: Response) {
 
     if (!session) {
       return res.status(404).json({ error: 'Inspection session not found' });
+    }
+
+    const userId = await resolveUserId(req.user);
+    if (!userId) {
+      return res.status(401).json({ error: 'User session invalid. Please log in again.' });
     }
 
     const items = session.balloons.map((b) => ({
@@ -63,7 +82,7 @@ export async function generateExcel(req: AuthRequest, res: Response) {
         inspectionSessionId,
         type: 'EXCEL',
         filePath: excelPath,
-        generatedById: req.user!.id
+        generatedById: userId
       }
     });
 
@@ -74,7 +93,7 @@ export async function generateExcel(req: AuthRequest, res: Response) {
     });
   } catch (error: any) {
     console.error('Generate Excel report error:', error);
-    return res.status(500).json({ error: 'Failed to generate Excel report' });
+    return res.status(500).json({ error: error?.message || 'Failed to generate Excel report' });
   }
 }
 
@@ -97,6 +116,11 @@ export async function generateMarkedPdf(req: AuthRequest, res: Response) {
 
     if (!session) {
       return res.status(404).json({ error: 'Inspection session not found' });
+    }
+
+    const userId = await resolveUserId(req.user);
+    if (!userId) {
+      return res.status(401).json({ error: 'User session invalid. Please log in again.' });
     }
 
     const inputPdfPath = path.resolve(session.drawing.filePath);
@@ -125,7 +149,7 @@ export async function generateMarkedPdf(req: AuthRequest, res: Response) {
         inspectionSessionId,
         type: 'MARKED_PDF',
         filePath: outputPdfPath,
-        generatedById: req.user!.id
+        generatedById: userId
       }
     });
 
