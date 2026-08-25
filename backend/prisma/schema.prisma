@@ -1,5 +1,5 @@
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -72,6 +72,14 @@ model Balloon {
   leaderStartY        Float?
   leaderEndX          Float?
   leaderEndY          Float?
+  
+  // --- NEW AI EXTRACTION FIELDS ---
+  isAiExtracted       Boolean           @default(false)
+  nominalValue        Float?
+  upperTolerance      Float?
+  lowerTolerance      Float?
+  unit                String            @default("mm")
+  
   createdById         String
   createdBy           User              @relation(fields: [createdById], references: [id])
   createdAt           DateTime          @default(now())
@@ -85,11 +93,15 @@ model Measurement {
   balloonId      String   @unique
   balloon        Balloon  @relation(fields: [balloonId], references: [id], onDelete: Cascade)
   dimensionText  String?  // e.g., "25 ± 0.10"
+  
+  // Values below can be copied from Balloon initially, but represent the actual validated state
   nominalValue   Float?
   upperTolerance Float?
   lowerTolerance Float?
   lowerLimit     Float?
   upperLimit     Float?
+  
+  // The inspector's physical measurement input
   actualValue    Float?
   unit           String   @default("mm")
   status         String   @default("PENDING") // PASS, CHECK, FAIL, PENDING

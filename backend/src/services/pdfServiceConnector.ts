@@ -4,8 +4,8 @@ import { config } from '../config';
 export interface ExtractDimensionParams {
   filePath: string;
   pageNumber: number;
-  normX: float;
-  normY: float;
+  normX: number; 
+  normY: number; 
 }
 
 export interface AutoExtractParams {
@@ -16,34 +16,27 @@ export interface AutoExtractParams {
 export interface AutoExtractResponse {
   success: boolean;
   pageNumber: number;
-  totalTiles: number;
-  activeTilesProcessed: number;
   skippedBlankTiles: number[];
   extractedCount: number;
   processingTimeSeconds: number;
   macroMetadata?: {
     partNumber?: string;
-    partName?: string;
     revision?: string;
-    generalTolerance?: string;
-    scale?: string;
     unit?: string;
   };
   balloons: Array<{
     balloonNumber: number;
     x: number;
     y: number;
-    leaderStartX?: number;
-    leaderStartY?: number;
+    leaderStartX: number;
+    leaderStartY: number;
     dimensionText: string;
     nominalValue: number | null;
     upperTolerance: number | null;
     lowerTolerance: number | null;
     unit: string;
-    prefix: string;
-    type: string;
+    isAiExtracted: boolean; 
   }>;
-  engineUsed: string;
 }
 
 export async function autoExtractDimensionsFromPdf(params: AutoExtractParams): Promise<AutoExtractResponse> {
@@ -52,7 +45,7 @@ export async function autoExtractDimensionsFromPdf(params: AutoExtractParams): P
       filePath: params.filePath,
       pageNumber: params.pageNumber || 1
     }, {
-      timeout: 120000 // 2 minutes timeout for multi-tile AI extraction
+      timeout: 600000 // INCREASED TO 10 MINUTES (600,000 ms) for prototype safety
     });
     return response.data;
   } catch (error: any) {
@@ -62,7 +55,6 @@ export async function autoExtractDimensionsFromPdf(params: AutoExtractParams): P
 }
 
 export async function extractDimensionFromPdf(params: ExtractDimensionParams) {
-
   try {
     const response = await axios.post(`${config.pdfServiceUrl}/api/pdf/extract-text`, {
       filePath: params.filePath,

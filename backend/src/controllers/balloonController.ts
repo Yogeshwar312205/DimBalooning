@@ -65,6 +65,15 @@ export async function autoExtractBalloons(req: AuthRequest, res: Response) {
           height: 0.04,
           leaderStartX: item.leaderStartX ?? null,
           leaderStartY: item.leaderStartY ?? null,
+          
+          // --- NEW AI EXTRACTED POSTGRES FIELDS ---
+          isAiExtracted: item.isAiExtracted || true,
+          nominalValue: nominal,
+          upperTolerance: upperTol,
+          lowerTolerance: lowerTol,
+          unit: item.unit || 'mm',
+          // -----------------------------------------
+
           createdById: req.user!.id,
           measurement: {
             create: {
@@ -95,26 +104,20 @@ export async function autoExtractBalloons(req: AuthRequest, res: Response) {
       sessionId,
       balloons: createdBalloons,
       extractionSummary: {
-        totalTiles: extractionResult.totalTiles,
-        activeTiles: extractionResult.activeTilesProcessed,
         skippedBlankTiles: extractionResult.skippedBlankTiles,
         extractedCount: createdBalloons.length,
         processingTimeSeconds: extractionResult.processingTimeSeconds,
-        engineUsed: extractionResult.engineUsed,
         macroMetadata: extractionResult.macroMetadata
       }
     });
 
     return res.status(200).json({
-      message: `Successfully auto-extracted ${createdBalloons.length} dimensions using ${extractionResult.engineUsed}`,
+      message: `Successfully auto-extracted ${createdBalloons.length} dimensions`,
       balloons: createdBalloons,
       extractionSummary: {
-        totalTiles: extractionResult.totalTiles,
-        activeTiles: extractionResult.activeTilesProcessed,
         skippedBlankTiles: extractionResult.skippedBlankTiles,
         extractedCount: createdBalloons.length,
         processingTimeSeconds: extractionResult.processingTimeSeconds,
-        engineUsed: extractionResult.engineUsed,
         macroMetadata: extractionResult.macroMetadata
       }
     });
@@ -152,7 +155,6 @@ export async function createBalloon(req: AuthRequest, res: Response) {
       return res.status(404).json({ error: 'Inspection session not found' });
     }
 
-    // 1. Calculate next sequential balloon number
     const existingBalloons = await prisma.balloon.findMany({
       where: { inspectionSessionId },
       select: { balloonNumber: true }
@@ -164,7 +166,6 @@ export async function createBalloon(req: AuthRequest, res: Response) {
       nextBalloonNumber = maxNum + 1;
     }
 
-    // 2. Extract dimension or use manual fallback
     let extracted: any = null;
     if (manualDimension) {
       extracted = {
@@ -186,7 +187,11 @@ export async function createBalloon(req: AuthRequest, res: Response) {
       });
     }
 
-    // 3. Create Balloon in DB
+    const nominal = extracted?.nominalValue !== undefined ? extracted.nominalValue : null;
+    const upperTol = extracted?.upperTolerance !== undefined ? extracted.upperTolerance : null;
+    const lowerTol = extracted?.lowerTolerance !== undefined ? extracted.lowerTolerance : null;
+    const initialTolerance = calculateTolerance(nominal, upperTol, lowerTol, null);
+
     const balloon = await prisma.balloon.create({
       data: {
         inspectionSessionId,
@@ -198,15 +203,18 @@ export async function createBalloon(req: AuthRequest, res: Response) {
         height,
         leaderStartX: leaderStartX ?? null,
         leaderStartY: leaderStartY ?? null,
+        
+        // --- NEW POSTGRES FIELDS FOR MANUAL BALLOONS ---
+        isAiExtracted: false, // Explicitly false for manually drawn balloons
+        nominalValue: nominal,
+        upperTolerance: upperTol,
+        lowerTolerance: lowerTol,
+        unit: extracted?.unit || 'mm',
+        // -----------------------------------------------
+
         createdById: req.user!.id
       }
     });
-
-    // 4. Compute initial limits if nominal provided
-    const nominal = extracted?.nominalValue !== undefined ? extracted.nominalValue : null;
-    const upperTol = extracted?.upperTolerance !== undefined ? extracted.upperTolerance : null;
-    const lowerTol = extracted?.lowerTolerance !== undefined ? extracted.lowerTolerance : null;
-    const initialTolerance = calculateTolerance(nominal, upperTol, lowerTol, null);
 
     const measurement = await prisma.measurement.create({
       data: {
@@ -229,7 +237,6 @@ export async function createBalloon(req: AuthRequest, res: Response) {
       createdBy: { id: req.user!.id, name: req.user!.name }
     };
 
-    // Broadcast WebSocket event
     broadcastToInspectionSession(inspectionSessionId, 'BALLOON_CREATED', {
       balloon: resultBalloon,
       extracted

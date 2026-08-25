@@ -31,6 +31,15 @@ export interface Balloon {
   leaderStartY: number | null;
   leaderEndX: number | null;
   leaderEndY: number | null;
+  
+  // --- NEW AI EXTRACTION FIELDS ---
+  isAiExtracted: boolean;
+  nominalValue: number | null;
+  upperTolerance: number | null;
+  lowerTolerance: number | null;
+  unit: string;
+  // --------------------------------
+  
   createdById: string;
   createdAt: string;
   updatedAt: string;
