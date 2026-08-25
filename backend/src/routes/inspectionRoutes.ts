@@ -6,12 +6,10 @@ import {
   updateInspectionStatus,
   getDashboardStats
 } from '../controllers/inspectionController';
-import { authenticateToken } from '../middleware/authMiddleware';
 
 const router = Router();
 
-router.use(authenticateToken);
-
+// Frictionless Prototyping - No token barrier
 router.post('/', createInspectionSession);
 router.get('/', getInspectionSessions);
 router.get('/stats/dashboard', getDashboardStats);

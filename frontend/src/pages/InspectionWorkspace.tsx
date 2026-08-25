@@ -8,7 +8,7 @@ import { InspectionTable } from '../components/Inspection/InspectionTable';
 import { ManualExtractionModal } from '../components/Ballooning/ManualExtractionModal';
 import { CollaboratorList } from '../components/Inspection/CollaboratorList';
 import { connectInspectionSocket, disconnectInspectionSocket } from '../services/socketService';
-import { FileSpreadsheet, FileText, ArrowLeft, RefreshCw, Cpu, GripVertical } from 'lucide-react';
+import { FileSpreadsheet, FileText, ArrowLeft, RefreshCw, Cpu, GripVertical, AlertTriangle } from 'lucide-react';
 import api from '../services/api';
 
 export const InspectionWorkspace: React.FC = () => {
@@ -17,6 +17,7 @@ export const InspectionWorkspace: React.FC = () => {
 
   const { activeSession, setSession, activeTool } = useInspectionStore();
   const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [canvasDimensions, setCanvasDimensions] = useState<{ width: number; height: number; totalPages: number }>({
@@ -46,6 +47,7 @@ export const InspectionWorkspace: React.FC = () => {
   // Initial Load & Socket Connection
   useEffect(() => {
     if (!id) return;
+    setErrorMsg(null);
     fetchSessionDetails(id);
 
     connectInspectionSocket(id);
@@ -54,7 +56,7 @@ export const InspectionWorkspace: React.FC = () => {
     };
   }, [id]);
 
-  // Background Auto-Hydration Poller: If 0 balloons, check every 2.5s until populated
+  // Background Auto-Hydration Poller
   useEffect(() => {
     if (!id || !activeSession || (activeSession.balloons && activeSession.balloons.length > 0)) {
       return;
@@ -68,7 +70,7 @@ export const InspectionWorkspace: React.FC = () => {
           clearInterval(interval);
         }
       } catch (e) {
-        // silent background check
+        // silent check
       }
     }, 2500);
 
@@ -133,9 +135,15 @@ export const InspectionWorkspace: React.FC = () => {
     setIsRefreshing(true);
     try {
       const res = await api.get(`/inspections/${sessionId}`);
-      setSession(res.data.session);
-    } catch (err) {
+      if (res.data.session) {
+        setSession(res.data.session);
+        setErrorMsg(null);
+      } else {
+        setErrorMsg('Inspection session data was empty.');
+      }
+    } catch (err: any) {
       console.error('Failed to load inspection session:', err);
+      setErrorMsg(err?.response?.data?.error || 'Failed to load inspection session from database.');
     } finally {
       setLoading(false);
       setIsRefreshing(false);
@@ -248,11 +256,40 @@ export const InspectionWorkspace: React.FC = () => {
     setIsPanning(false);
   };
 
-  if (loading || !activeSession) {
+  if (loading) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center p-8 bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-400">
         <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
         <p className="text-sm font-medium mt-3">Loading Drawing Canvas...</p>
+      </div>
+    );
+  }
+
+  // Error State Handling
+  if (errorMsg || !activeSession) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center p-8 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
+        <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl max-w-md w-full text-center space-y-4">
+          <div className="w-12 h-12 rounded-2xl bg-rose-500/10 text-rose-500 flex items-center justify-center mx-auto">
+            <AlertTriangle className="w-6 h-6" />
+          </div>
+          <h3 className="font-bold text-base">Unable to Load Inspection Canvas</h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400">{errorMsg || 'Inspection session not found or database is waking up.'}</p>
+          <div className="pt-2 flex justify-center gap-3">
+            <button
+              onClick={() => navigate('/drawings')}
+              className="px-4 py-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+            >
+              Back to Drawings
+            </button>
+            <button
+              onClick={() => id && fetchSessionDetails(id)}
+              className="px-4 py-2 bg-blue-600 text-white font-bold rounded-xl text-xs hover:bg-blue-500 transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
