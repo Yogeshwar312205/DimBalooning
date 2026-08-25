@@ -307,10 +307,8 @@ export const InspectionWorkspace: React.FC = () => {
                 onChange={(e) => handleStatusChange(e.target.value)}
                 className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-xs font-mono font-bold text-blue-700 dark:text-cyan-400 rounded-lg px-2 py-0.5 focus:outline-none focus:border-blue-500 shadow-sm"
               >
-                <option value="DRAFT">DRAFT</option>
                 <option value="IN_PROGRESS">IN_PROGRESS</option>
                 <option value="COMPLETED">COMPLETED</option>
-                <option value="APPROVED">APPROVED</option>
               </select>
 
               {/* Real-time Persistent Extraction Status Badge */}
