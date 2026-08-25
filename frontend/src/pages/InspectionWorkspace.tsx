@@ -8,14 +8,22 @@ import { InspectionTable } from '../components/Inspection/InspectionTable';
 import { ManualExtractionModal } from '../components/Ballooning/ManualExtractionModal';
 import { CollaboratorList } from '../components/Inspection/CollaboratorList';
 import { connectInspectionSocket, disconnectInspectionSocket } from '../services/socketService';
-import { FileSpreadsheet, FileText, ArrowLeft, RefreshCw, Cpu, GripVertical, AlertTriangle } from 'lucide-react';
+import { FileSpreadsheet, FileText, ArrowLeft, RefreshCw, Cpu, GripVertical, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import api from '../services/api';
 
 export const InspectionWorkspace: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
-  const { activeSession, setSession, activeTool } = useInspectionStore();
+  const { 
+    activeSession, 
+    setSession, 
+    activeTool, 
+    isAutoExtracting, 
+    setIsAutoExtracting, 
+    extractionCompletedMsg 
+  } = useInspectionStore();
+
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
@@ -55,27 +63,6 @@ export const InspectionWorkspace: React.FC = () => {
       disconnectInspectionSocket(id);
     };
   }, [id]);
-
-  // Background Auto-Hydration Poller
-  useEffect(() => {
-    if (!id || !activeSession || (activeSession.balloons && activeSession.balloons.length > 0)) {
-      return;
-    }
-
-    const interval = setInterval(async () => {
-      try {
-        const res = await api.get(`/inspections/${id}`);
-        if (res.data.session?.balloons?.length > 0) {
-          setSession(res.data.session);
-          clearInterval(interval);
-        }
-      } catch (e) {
-        // silent check
-      }
-    }, 2500);
-
-    return () => clearInterval(interval);
-  }, [id, activeSession?.balloons?.length]);
 
   // Viewport resize observer
   useEffect(() => {
@@ -156,6 +143,7 @@ export const InspectionWorkspace: React.FC = () => {
     if (!confirmScan) return;
 
     setIsExtracting(true);
+    setIsAutoExtracting(true);
     try {
       await api.post(`/drawings/${activeSession.drawingId}/extract`, { forceAi: true, grid: '3x3' });
       await fetchSessionDetails(id);
@@ -164,6 +152,7 @@ export const InspectionWorkspace: React.FC = () => {
       alert(err?.response?.data?.error || 'Deep AI Scan failed to complete.');
     } finally {
       setIsExtracting(false);
+      setIsAutoExtracting(false);
     }
   };
 
@@ -295,7 +284,6 @@ export const InspectionWorkspace: React.FC = () => {
   }
 
   const drawingFileUrl = `/api/drawings/${activeSession.drawingId}/file`;
-  const isBackgroundExtracting = !activeSession.balloons || activeSession.balloons.length === 0;
 
   return (
     <div className={`flex-1 flex flex-col h-full bg-slate-50 dark:bg-slate-950 overflow-hidden relative transition-colors text-slate-900 dark:text-slate-100 ${isDraggingSplitter ? 'select-none cursor-col-resize' : ''}`}>
@@ -325,13 +313,20 @@ export const InspectionWorkspace: React.FC = () => {
                 <option value="APPROVED">APPROVED</option>
               </select>
 
-              {isBackgroundExtracting && (
-                <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-cyan-400 border border-blue-500/20 text-[11px] font-mono font-semibold animate-pulse">
-                  <RefreshCw className="w-3 h-3 animate-spin" />
+              {/* Real-time Persistent Extraction Status Badge */}
+              {isAutoExtracting ? (
+                <span className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 text-blue-600 dark:text-cyan-400 border border-blue-500/20 text-xs font-mono font-semibold animate-pulse shadow-sm">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-500" />
                   Auto-Detecting Dimensions...
                 </span>
-              )}
+              ) : extractionCompletedMsg ? (
+                <span className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 text-xs font-mono font-bold animate-fade-in shadow-sm">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                  {extractionCompletedMsg}
+                </span>
+              ) : null}
             </div>
+
             <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono flex items-center gap-3">
               <span>Part: <strong className="text-slate-900 dark:text-slate-200">{activeSession.partNumber}</strong></span>
               <span>Batch: <strong className="text-slate-900 dark:text-slate-200">{activeSession.batchNumber}</strong></span>

@@ -10,12 +10,17 @@ export function connectInspectionSocket(inspectionSessionId: string) {
     socket.disconnect();
   }
 
-  socket = io('/', {
+  // Connect to the backend Express server on port 5000
+  const socketUrl = window.location.port === '3000' 
+    ? `${window.location.protocol}//${window.location.hostname}:5000`
+    : '/';
+
+  socket = io(socketUrl, {
     transports: ['websocket', 'polling']
   });
 
   socket.on('connect', () => {
-    console.log('⚡ Socket.io connected to server');
+    console.log('⚡ Socket.io connected to Backend (Port 5000)');
     socket?.emit('JOIN_INSPECTION_SESSION', { 
       inspectionSessionId,
       userName: 'Lead Inspector'
@@ -30,9 +35,9 @@ export function connectInspectionSocket(inspectionSessionId: string) {
     useInspectionStore.getState().addBalloon(balloon);
   });
 
-  // REAL-TIME AUTO-SYNC: Auto-hydrates all extracted balloons without clicking Sync!
+  // REAL-TIME AUTO-SYNC: Auto-populates all 90 balloons instantly!
   socket.on('BALLOONS_AUTO_EXTRACTED', ({ balloons }: { balloons: any[] }) => {
-    console.log(`⚡ WebSocket Auto-Sync: Received ${balloons.length} balloons from background worker!`);
+    console.log(`⚡ WebSocket Auto-Sync: Hydrated ${balloons.length} balloons into Canvas & Table!`);
     useInspectionStore.getState().addMultipleBalloons(balloons);
     useInspectionStore.getState().setIsAutoExtracting(false);
   });

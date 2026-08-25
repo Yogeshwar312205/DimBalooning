@@ -32,6 +32,7 @@ interface InspectionStore {
   manualFallbackModalOpen: boolean;
   manualPendingCoord: ManualPendingCoord | null;
   isAutoExtracting: boolean;
+  extractionCompletedMsg: string | null;
 
   setSession: (session: InspectionSession) => void;
   setBalloons: (balloons: Balloon[]) => void;
@@ -52,6 +53,7 @@ interface InspectionStore {
   openManualFallbackModal: (coord: ManualPendingCoord) => void;
   closeManualFallbackModal: () => void;
   setIsAutoExtracting: (loading: boolean) => void;
+  setExtractionCompletedMsg: (msg: string | null) => void;
 }
 
 export const useInspectionStore = create<InspectionStore>((set, get) => ({
@@ -67,6 +69,7 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
   manualFallbackModalOpen: false,
   manualPendingCoord: null,
   isAutoExtracting: false,
+  extractionCompletedMsg: null,
 
   setSession: (session: InspectionSession) => {
     set({
@@ -80,14 +83,21 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
   },
 
   setBalloons: (balloons: Balloon[]) => {
-    set({ balloons });
+    const session = get().activeSession;
+    set({ 
+      balloons,
+      activeSession: session ? { ...session, balloons } : null
+    });
   },
 
   addBalloon: (balloon: Balloon) => {
     const existing = get().balloons;
     if (existing.some((b) => b.id === balloon.id)) return;
+    const updated = [...existing, balloon];
+    const session = get().activeSession;
     set({
-      balloons: [...existing, balloon],
+      balloons: updated,
+      activeSession: session ? { ...session, balloons: updated } : null,
       selectedBalloonId: balloon.id
     });
   },
@@ -96,22 +106,38 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
     const existing = get().balloons;
     const existingIds = new Set(existing.map((b) => b.id));
     const toAdd = newBalloons.filter((b) => !existingIds.has(b.id));
+    const combined = [...existing, ...toAdd];
+    const session = get().activeSession;
+
     set({
-      balloons: [...existing, ...toAdd]
+      balloons: combined,
+      activeSession: session ? { ...session, balloons: combined } : null,
+      isAutoExtracting: false,
+      extractionCompletedMsg: `✓ ${combined.length} Dimensions Placed`
     });
+
+    setTimeout(() => {
+      set({ extractionCompletedMsg: null });
+    }, 4000);
   },
 
   updateBalloonInStore: (updatedBalloon: Balloon) => {
+    const updated = get().balloons.map((b) =>
+      b.id === updatedBalloon.id ? { ...b, ...updatedBalloon } : b
+    );
+    const session = get().activeSession;
     set({
-      balloons: get().balloons.map((b) =>
-        b.id === updatedBalloon.id ? { ...b, ...updatedBalloon } : b
-      )
+      balloons: updated,
+      activeSession: session ? { ...session, balloons: updated } : null
     });
   },
 
   deleteBalloonFromStore: (balloonId: string) => {
+    const updated = get().balloons.filter((b) => b.id !== balloonId);
+    const session = get().activeSession;
     set({
-      balloons: get().balloons.filter((b) => b.id !== balloonId),
+      balloons: updated,
+      activeSession: session ? { ...session, balloons: updated } : null,
       selectedBalloonId: get().selectedBalloonId === balloonId ? null : get().selectedBalloonId
     });
   },
@@ -129,16 +155,19 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
   },
 
   updateMeasurementInStore: (updatedMeasurement: Measurement) => {
+    const updated = get().balloons.map((b) => {
+      if (b.id === updatedMeasurement.balloonId || b.measurement?.id === updatedMeasurement.id) {
+        return {
+          ...b,
+          measurement: updatedMeasurement
+        };
+      }
+      return b;
+    });
+    const session = get().activeSession;
     set({
-      balloons: get().balloons.map((b) => {
-        if (b.id === updatedMeasurement.balloonId || b.measurement?.id === updatedMeasurement.id) {
-          return {
-            ...b,
-            measurement: updatedMeasurement
-          };
-        }
-        return b;
-      })
+      balloons: updated,
+      activeSession: session ? { ...session, balloons: updated } : null
     });
   },
 
@@ -152,5 +181,6 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
   setOnlineCollaborators: (users: InspectorUser[]) => set({ onlineCollaborators: users }),
   openManualFallbackModal: (coord) => set({ manualFallbackModalOpen: true, manualPendingCoord: coord }),
   closeManualFallbackModal: () => set({ manualFallbackModalOpen: false, manualPendingCoord: null }),
-  setIsAutoExtracting: (loading: boolean) => set({ isAutoExtracting: loading })
+  setIsAutoExtracting: (loading: boolean) => set({ isAutoExtracting: loading }),
+  setExtractionCompletedMsg: (msg: string | null) => set({ extractionCompletedMsg: msg })
 }));

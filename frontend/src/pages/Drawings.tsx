@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Drawing } from '../types/drawing';
+import { useInspectionStore } from '../store/useInspectionStore';
 import { 
   Upload, 
   FileCode, 
@@ -11,8 +12,7 @@ import {
   FileSpreadsheet, 
   FileText, 
   Play, 
-  X,
-  RefreshCw 
+  X 
 } from 'lucide-react';
 import api from '../services/api';
 
@@ -37,6 +37,7 @@ export const Drawings: React.FC = () => {
   const [batchNumber, setBatchNumber] = useState('');
 
   const navigate = useNavigate();
+  const { setIsAutoExtracting } = useInspectionStore();
 
   useEffect(() => {
     fetchDrawings();
@@ -70,18 +71,19 @@ export const Drawings: React.FC = () => {
     formData.append('revision', revision);
 
     try {
-      // Step 1: Upload and auto-extract (Backend creates Drawing + Session + Balloons in 1 step)
       const res = await api.post('/drawings', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
       
       const newSessionId = res.data.session.id;
 
+      // Set extracting indicator active for the canvas header
+      setIsAutoExtracting(true);
+
       setUploadModalOpen(false);
       setPdfFile(null);
       setDrawingName('');
 
-      // Step 2: Route directly into the populated canvas cockpit
       navigate(`/inspections/${newSessionId}`);
     } catch (err: any) {
       setError(err?.response?.data?.error || 'Failed to process PDF drawing');
@@ -168,10 +170,10 @@ export const Drawings: React.FC = () => {
   return (
     <div className="flex-1 p-6 overflow-auto bg-slate-50 dark:bg-slate-950 space-y-6 transition-colors">
       {/* Top Banner */}
-      <div className="flex items-center justify-between bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 p-6 rounded-2xl shadow-sm">
+      <div className="flex items-center justify-between bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-sm">
         <div>
-          <h2 className="text-xl font-bold text-slate-900 dark:text-white tracking-wide font-display">Engineering Drawings Hub</h2>
-          <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">Upload CAD drawings, view historical inspection runs, and export FAIR/PPAP reports.</p>
+          <h2 className="text-xl font-bold text-slate-900 dark:text-white tracking-wide font-display">Engineering Drawings</h2>
+          <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">Upload CAD drawings, view inspection history, and export FAIR/PPAP reports.</p>
         </div>
 
         <button
@@ -187,7 +189,7 @@ export const Drawings: React.FC = () => {
       {loading ? (
         <div className="py-12 text-center text-slate-500">Loading drawings library...</div>
       ) : drawings.length === 0 ? (
-        <div className="py-16 text-center bg-white dark:bg-slate-900 rounded-2xl border border-slate-300 dark:border-slate-800 space-y-3">
+        <div className="py-16 text-center bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
           <FileCode className="w-12 h-12 text-slate-400 mx-auto" />
           <h3 className="text-base font-bold text-slate-900 dark:text-white">No Drawings Uploaded</h3>
           <p className="text-xs text-slate-600 dark:text-slate-400">Upload your first 2D engineering PDF to begin automatic dimension ballooning.</p>
@@ -196,20 +198,19 @@ export const Drawings: React.FC = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {drawings.map((drawing: any) => {
             const sessionCount = drawing.inspectionSessions?.length || 0;
-            const latestSession = drawing.inspectionSessions?.[0];
 
             return (
               <div 
                 key={drawing.id} 
                 onClick={() => setSelectedDrawing(drawing)}
-                className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-300 dark:border-slate-800 p-5 flex flex-col justify-between space-y-4 hover:border-blue-500 dark:hover:border-blue-500 shadow-sm transition-all cursor-pointer group"
+                className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5 flex flex-col justify-between space-y-4 hover:border-blue-500 dark:hover:border-blue-500 shadow-sm transition-all cursor-pointer group"
               >
                 <div className="space-y-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="p-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl text-blue-600 dark:text-blue-400 shrink-0">
                       <FileCode className="w-6 h-6" />
                     </div>
-                    <span className="text-xs font-mono font-semibold px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-cyan-600 dark:text-cyan-400 border border-slate-300 dark:border-slate-700">
+                    <span className="text-xs font-mono font-semibold px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-cyan-600 dark:text-cyan-400 border border-slate-200 dark:border-slate-700">
                       {drawing.revision}
                     </span>
                   </div>
@@ -230,7 +231,7 @@ export const Drawings: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs">
+                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs">
                   <span className="font-mono font-semibold text-slate-600 dark:text-slate-400">
                     {sessionCount} {sessionCount === 1 ? 'Inspection Run' : 'Inspection Runs'}
                   </span>
@@ -249,7 +250,7 @@ export const Drawings: React.FC = () => {
       {/* Drawing Detail & Inspection History Drawer */}
       {selectedDrawing && (
         <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/70 backdrop-blur-sm">
-          <div className="w-full max-w-xl bg-white dark:bg-slate-900 border-l border-slate-300 dark:border-slate-800 h-full flex flex-col justify-between shadow-2xl p-6 overflow-y-auto">
+          <div className="w-full max-w-xl bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 h-full flex flex-col justify-between shadow-2xl p-6 overflow-y-auto">
             <div className="space-y-6">
               {/* Drawer Header */}
               <div className="flex items-start justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
@@ -264,7 +265,7 @@ export const Drawings: React.FC = () => {
                 </div>
                 <button
                   onClick={() => setSelectedDrawing(null)}
-                  className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-white rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"
+                  className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-white rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -322,14 +323,14 @@ export const Drawings: React.FC = () => {
                           <button
                             onClick={(e) => handleDirectDownloadExcel(session.id, session.partNumber, e)}
                             title="Download Excel Report"
-                            className="p-1.5 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 rounded-lg border border-slate-300 dark:border-slate-700"
+                            className="p-1.5 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 rounded-lg border border-slate-200 dark:border-slate-700"
                           >
                             <FileSpreadsheet className="w-3.5 h-3.5" />
                           </button>
                           <button
                             onClick={(e) => handleDirectDownloadPdf(session.id, session.partNumber, e)}
                             title="Download Marked PDF"
-                            className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/50 rounded-lg border border-slate-300 dark:border-slate-700"
+                            className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/50 rounded-lg border border-slate-200 dark:border-slate-700"
                           >
                             <FileText className="w-3.5 h-3.5" />
                           </button>
@@ -354,7 +355,7 @@ export const Drawings: React.FC = () => {
       {/* Upload PDF Modal */}
       {uploadModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-          <div className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
             <h3 className="font-bold text-base text-slate-900 dark:text-white">Upload Engineering Drawing PDF</h3>
             {error && <div className="p-3 bg-rose-50 dark:bg-rose-950 border border-rose-200 dark:border-rose-800 text-rose-600 dark:text-rose-300 rounded-xl text-xs">{error}</div>}
 
@@ -366,7 +367,7 @@ export const Drawings: React.FC = () => {
                   accept="application/pdf"
                   required
                   onChange={(e) => setPdfFile(e.target.files ? e.target.files[0] : null)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl p-2.5 text-xs text-slate-700 dark:text-slate-300"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-xs text-slate-700 dark:text-slate-300"
                 />
               </div>
 
@@ -377,7 +378,7 @@ export const Drawings: React.FC = () => {
                   value={drawingName}
                   onChange={(e) => setDrawingName(e.target.value)}
                   placeholder="e.g. GB-1049 Transmission Housing"
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl px-3.5 py-2 text-slate-900 dark:text-white"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2 text-slate-900 dark:text-white"
                 />
               </div>
 
@@ -388,7 +389,7 @@ export const Drawings: React.FC = () => {
                   value={revision}
                   onChange={(e) => setRevision(e.target.value)}
                   placeholder="Rev A"
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl px-3.5 py-2 text-slate-900 dark:text-white font-mono"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2 text-slate-900 dark:text-white font-mono"
                 />
               </div>
 
@@ -405,7 +406,7 @@ export const Drawings: React.FC = () => {
                   disabled={uploading}
                   className="px-5 py-2 bg-blue-600 text-white font-semibold rounded-xl"
                 >
-                  {uploading ? 'Auto-Extracting & Placing Balloons...' : 'Upload & Launch Cockpit'}
+                  {uploading ? 'Auto-Extracting & Placing Balloons...' : 'Upload & Open Canvas'}
                 </button>
               </div>
             </form>
@@ -416,7 +417,7 @@ export const Drawings: React.FC = () => {
       {/* Create New Session Modal */}
       {createSessionModalOpen && selectedDrawing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-          <div className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
             <h3 className="font-bold text-base text-slate-900 dark:text-white">Start New Inspection Run</h3>
             <form onSubmit={handleCreateNewSession} className="space-y-4 text-sm">
               <div>
@@ -426,7 +427,7 @@ export const Drawings: React.FC = () => {
                   required
                   value={sessionName}
                   onChange={(e) => setSessionName(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl px-3.5 py-2 text-slate-900 dark:text-white"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2 text-slate-900 dark:text-white"
                 />
               </div>
 
@@ -438,7 +439,7 @@ export const Drawings: React.FC = () => {
                     required
                     value={partNumber}
                     onChange={(e) => setPartNumber(e.target.value)}
-                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl px-3 py-2 text-slate-900 dark:text-white font-mono"
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 text-slate-900 dark:text-white font-mono"
                   />
                 </div>
                 <div>
@@ -448,7 +449,7 @@ export const Drawings: React.FC = () => {
                     required
                     value={batchNumber}
                     onChange={(e) => setBatchNumber(e.target.value)}
-                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl px-3 py-2 text-slate-900 dark:text-white font-mono"
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 text-slate-900 dark:text-white font-mono"
                   />
                 </div>
               </div>
@@ -460,7 +461,7 @@ export const Drawings: React.FC = () => {
                   required
                   value={partName}
                   onChange={(e) => setPartName(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl px-3.5 py-2 text-slate-900 dark:text-white"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2 text-slate-900 dark:text-white"
                 />
               </div>
 
@@ -476,7 +477,7 @@ export const Drawings: React.FC = () => {
                   type="submit"
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl"
                 >
-                  Launch Workspace
+                  Open Canvas
                 </button>
               </div>
             </form>
