@@ -2,7 +2,8 @@ import { Response } from 'express';
 import { AuthRequest } from '../middleware/authMiddleware';
 import { PrismaClient } from '@prisma/client';
 import path from 'path';
-import { extractDimensionFromPdf } from '../services/pdfServiceConnector';
+import fs from 'fs';
+import { extractDimensionFromPdf, extractAllDimensionsFromPdf } from '../services/pdfServiceConnector';
 import { calculateTolerance } from '../utils/toleranceCalculator';
 import { broadcastToInspectionSession } from '../websocket/socketHandler';
 
@@ -147,6 +148,144 @@ export async function createBalloon(req: AuthRequest, res: Response) {
   } catch (error: any) {
     console.error('Create balloon error:', error);
     return res.status(500).json({ error: 'Failed to create balloon' });
+  }
+}
+
+export async function autoDetectBalloons(req: AuthRequest, res: Response) {
+  try {
+    const { inspectionSessionId, pageNumber = 1 } = req.body;
+    if (!inspectionSessionId) {
+      return res.status(400).json({ error: 'inspectionSessionId is required' });
+    }
+
+    const session = await prisma.inspectionSession.findUnique({
+      where: { id: inspectionSessionId },
+      include: { drawing: true }
+    });
+
+    if (!session || !session.drawing) {
+      return res.status(404).json({ error: 'Inspection session or drawing file not found' });
+    }
+
+    let drawingPath = session.drawing.filePath;
+    if (!fs.existsSync(drawingPath)) {
+      drawingPath = path.resolve(process.cwd(), session.drawing.filePath);
+    }
+    if (!fs.existsSync(drawingPath)) {
+      drawingPath = path.resolve(process.cwd(), 'uploads', path.basename(session.drawing.filePath));
+    }
+
+    if (!fs.existsSync(drawingPath)) {
+      return res.status(404).json({ error: `PDF file not found on server disk at ${drawingPath}` });
+    }
+
+    const extractedData = await extractAllDimensionsFromPdf(drawingPath, pageNumber);
+
+    if (!extractedData.success || !extractedData.items || extractedData.items.length === 0) {
+      const msg = extractedData.error || 'No dimension callouts detected on this page.';
+      return res.json({ message: msg, count: 0, balloons: [] });
+    }
+
+    // Safe user lookup
+    let userId = req.user?.id;
+    if (userId) {
+      const userExists = await prisma.user.findUnique({ where: { id: userId } });
+      if (!userExists) {
+        const fallbackUser = await prisma.user.findFirst();
+        userId = fallbackUser?.id;
+      }
+    }
+
+    if (!userId) {
+      return res.status(401).json({ error: 'User session invalid. Please log in again.' });
+    }
+
+    const existingBalloons = await prisma.balloon.findMany({
+      where: { inspectionSessionId },
+      select: { balloonNumber: true, x: true, y: true }
+    });
+
+    let currentMaxNum = existingBalloons.length > 0 ? Math.max(...existingBalloons.map(b => b.balloonNumber)) : 0;
+    const createdBalloons = [];
+
+    for (const item of extractedData.items) {
+      const isDuplicate = existingBalloons.some(
+        b => Math.abs(b.x - item.normX) < 0.03 && Math.abs(b.y - item.normY) < 0.03
+      );
+      if (isDuplicate) continue;
+
+      currentMaxNum++;
+      const targetX = item.normX;
+      const targetY = item.normY;
+      // Offset balloon circle slightly so it doesn't overlap text and draws dotted leader line
+      const balloonX = Math.min(0.96, targetX + 0.035);
+      const balloonY = Math.max(0.02, targetY - 0.025);
+
+      const balloon = await prisma.balloon.create({
+        data: {
+          inspectionSessionId,
+          balloonNumber: currentMaxNum,
+          pageNumber,
+          x: balloonX,
+          y: balloonY,
+          leaderStartX: targetX,
+          leaderStartY: targetY,
+          width: 0.04,
+          height: 0.04,
+          createdById: userId
+        }
+      });
+
+      const nominal = item.nominalValue ?? null;
+      const upperTol = item.upperTolerance ?? null;
+      const lowerTol = item.lowerTolerance ?? null;
+      const initialTolerance = calculateTolerance(nominal, upperTol, lowerTol, null);
+
+      const measurement = await prisma.measurement.create({
+        data: {
+          balloonId: balloon.id,
+          dimensionText: item.rawText || `Dim #${currentMaxNum}`,
+          nominalValue: nominal,
+          upperTolerance: upperTol,
+          lowerTolerance: lowerTol,
+          lowerLimit: initialTolerance.lowerLimit,
+          upperLimit: initialTolerance.upperLimit,
+          actualValue: null,
+          unit: item.unit || 'mm',
+          status: 'PENDING'
+        }
+      });
+
+      const fullBalloon = {
+        ...balloon,
+        measurement,
+        createdBy: { id: userId, name: req.user?.name || 'Inspector' }
+      };
+
+      createdBalloons.push(fullBalloon);
+
+      broadcastToInspectionSession(inspectionSessionId, 'BALLOON_CREATED', {
+        balloon: fullBalloon,
+        extracted: item
+      });
+    }
+
+    if (createdBalloons.length === 0 && extractedData.items.length > 0) {
+      return res.json({
+        message: `All ${extractedData.items.length} detected dimension callouts on this page are already ballooned.`,
+        count: 0,
+        balloons: []
+      });
+    }
+
+    return res.status(201).json({
+      message: `Successfully auto-detected ${createdBalloons.length} dimension balloons`,
+      count: createdBalloons.length,
+      balloons: createdBalloons
+    });
+  } catch (error: any) {
+    console.error('Auto detect balloons error:', error);
+    return res.status(500).json({ error: error?.message || 'Failed to auto detect balloons' });
   }
 }
 

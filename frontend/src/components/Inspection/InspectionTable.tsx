@@ -2,15 +2,32 @@ import React, { useState } from 'react';
 import { useInspectionStore } from '../../store/useInspectionStore';
 import { Balloon } from '../../types/balloon';
 import { Badge } from '../Common/Badge';
-import { Trash2, AlertCircle } from 'lucide-react';
+import { Trash2, AlertCircle, Sparkles, RefreshCw } from 'lucide-react';
 import api from '../../services/api';
 
 export const InspectionTable: React.FC = () => {
-  const { balloons, selectedBalloonId, setSelectedBalloonId, deleteBalloonFromStore, updateMeasurementInStore } =
+  const { balloons, selectedBalloonId, setSelectedBalloonId, deleteBalloonFromStore, updateMeasurementInStore, autoDetectAllBalloons } =
     useInspectionStore();
 
   const [editingValues, setEditingValues] = useState<Record<string, string>>({});
   const [savingIds, setSavingIds] = useState<Record<string, boolean>>({});
+  const [isAutoDetecting, setIsAutoDetecting] = useState(false);
+
+  const handleAutoDetectAll = async () => {
+    setIsAutoDetecting(true);
+    try {
+      const res = await autoDetectAllBalloons();
+      if (res && res.count > 0) {
+        alert(`Successfully auto-detected ${res.count} dimension balloons!`);
+      } else {
+        alert(res?.message || 'No new dimension callouts found on this page.');
+      }
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Failed to auto detect balloons.');
+    } finally {
+      setIsAutoDetecting(false);
+    }
+  };
 
   const sortedBalloons = [...balloons].sort((a, b) => a.balloonNumber - b.balloonNumber);
 
@@ -80,9 +97,20 @@ export const InspectionTable: React.FC = () => {
             Click row to focus on drawing canvas
           </p>
         </div>
-        <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-full bg-slate-200 dark:bg-slate-800 text-blue-700 dark:text-cyan-400 border border-slate-300 dark:border-slate-700">
-          {balloons.length} Dimensions
-        </span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleAutoDetectAll}
+            disabled={isAutoDetecting}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-white text-xs font-bold rounded-xl shadow-md transition-all disabled:opacity-50"
+            title="Automatically detect all dimensions on this drawing page"
+          >
+            {isAutoDetecting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+            <span>Auto Detect</span>
+          </button>
+          <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-full bg-slate-200 dark:bg-slate-800 text-blue-700 dark:text-cyan-400 border border-slate-300 dark:border-slate-700">
+            {balloons.length} Dimensions
+          </span>
+        </div>
       </div>
 
       {/* Table Content */}

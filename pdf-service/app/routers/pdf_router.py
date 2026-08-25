@@ -4,7 +4,7 @@ from typing import List, Optional, Any, Dict
 import os
 import shutil
 import tempfile
-from app.services.pdf_extractor import extract_text_at_coordinate, get_pdf_metadata
+from app.services.pdf_extractor import extract_text_at_coordinate, get_pdf_metadata, extract_all_dimensions_from_page
 from app.services.pdf_markup import generate_marked_up_pdf
 
 router = APIRouter(prefix="/api/pdf", tags=["PDF Processing"])
@@ -14,6 +14,10 @@ class ExtractTextRequest(BaseModel):
     pageNumber: int = 1
     normX: float
     normY: float
+
+class ExtractAllRequest(BaseModel):
+    filePath: str
+    pageNumber: int = 1
 
 class BalloonMarkupItem(BaseModel):
     pageNumber: int = 1
@@ -35,6 +39,14 @@ def extract_text(req: ExtractTextRequest):
         raise HTTPException(status_code=404, detail=f"PDF file not found at {req.filePath}")
     
     result = extract_text_at_coordinate(req.filePath, req.pageNumber, req.normX, req.normY)
+    return result
+
+@router.post("/extract-all")
+def extract_all(req: ExtractAllRequest):
+    if not os.path.exists(req.filePath):
+        raise HTTPException(status_code=404, detail=f"PDF file not found at {req.filePath}")
+    
+    result = extract_all_dimensions_from_page(req.filePath, req.pageNumber)
     return result
 
 @router.post("/generate-markup")

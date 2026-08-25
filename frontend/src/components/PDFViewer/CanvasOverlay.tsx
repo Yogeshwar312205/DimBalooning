@@ -205,8 +205,8 @@ export const CanvasOverlay: React.FC<CanvasOverlayProps> = ({ width, height }) =
       let targetDot: fabric.Circle | null = null;
 
       const hasLeader = b.leaderStartX !== null && b.leaderStartX !== undefined && b.leaderStartY !== null && b.leaderStartY !== undefined;
-      const lx = hasLeader ? b.leaderStartX! * width : px;
-      const ly = hasLeader ? b.leaderStartY! * height : py;
+      const lx = hasLeader ? b.leaderStartX! * width : (px - 28);
+      const ly = hasLeader ? b.leaderStartY! * height : (py + 20);
 
       const dist = Math.hypot(lx - px, ly - py);
 

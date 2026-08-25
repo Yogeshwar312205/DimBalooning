@@ -29,6 +29,22 @@ export async function extractDimensionFromPdf(params: ExtractDimensionParams) {
   }
 }
 
+export async function extractAllDimensionsFromPdf(filePath: string, pageNumber: number = 1) {
+  try {
+    const response = await axios.post(`${config.pdfServiceUrl}/api/pdf/extract-all`, {
+      filePath,
+      pageNumber
+    }, {
+      timeout: 180000
+    });
+    return response.data;
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail || error?.response?.data?.error || error.message;
+    console.error('PDF Service extractAll error:', detail);
+    return { success: false, items: [], error: detail };
+  }
+}
+
 export async function requestMarkedUpPdf(inputPdfPath: string, outputPdfPath: string, balloons: any[]) {
   try {
     const response = await axios.post(`${config.pdfServiceUrl}/api/pdf/generate-markup`, {

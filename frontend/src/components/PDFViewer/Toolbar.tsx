@@ -1,6 +1,19 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useInspectionStore } from '../../store/useInspectionStore';
-import { MousePointer, CircleDot, Move, ZoomIn, ZoomOut, Maximize2, MoveHorizontal, ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
+import {
+  MousePointer,
+  CircleDot,
+  Move,
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
+  MoveHorizontal,
+  ChevronLeft,
+  ChevronRight,
+  Trash2,
+  Sparkles,
+  RefreshCw
+} from 'lucide-react';
 
 interface ToolbarProps {
   totalPages: number;
@@ -17,66 +30,102 @@ export const Toolbar: React.FC<ToolbarProps> = ({ totalPages }) => {
     currentPage,
     setCurrentPage,
     selectedBalloonId,
-    deleteSelectedBalloon
+    deleteSelectedBalloon,
+    autoDetectAllBalloons
   } = useInspectionStore();
+
+  const [isDetecting, setIsDetecting] = useState(false);
+
+  const handleAutoDetect = async () => {
+    setIsDetecting(true);
+    try {
+      const res = await autoDetectAllBalloons();
+      if (res && res.count > 0) {
+        alert(`Successfully detected and created ${res.count} dimension balloons!`);
+      } else {
+        alert(res?.message || 'No new dimension callouts found on this page.');
+      }
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Failed to auto detect balloons on drawing.');
+    } finally {
+      setIsDetecting(false);
+    }
+  };
 
   const handleZoomIn = () => setZoomLevel(zoomLevel + 0.2);
   const handleZoomOut = () => setZoomLevel(zoomLevel - 0.2);
 
   return (
     <div className="h-14 border-b border-slate-300 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 flex items-center justify-between shrink-0 transition-colors shadow-sm text-slate-900 dark:text-slate-100">
-      {/* Tool Selection */}
-      <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-950 p-1 rounded-xl border border-slate-300 dark:border-slate-800">
-        <button
-          onClick={() => setActiveTool('SELECT')}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-            activeTool === 'SELECT'
-              ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
-              : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
-          }`}
-          title="Select & Move Balloon"
-        >
-          <MousePointer className="w-4 h-4" />
-          <span>Select</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTool('BALLOON')}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-            activeTool === 'BALLOON'
-              ? 'bg-emerald-600 text-white shadow-md shadow-emerald-500/20'
-              : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
-          }`}
-          title="Click drawing to add balloon"
-        >
-          <CircleDot className="w-4 h-4" />
-          <span>Add Balloon</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTool('PAN')}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-            activeTool === 'PAN'
-              ? 'bg-purple-600 text-white shadow-md shadow-purple-500/20'
-              : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
-          }`}
-          title="Pan & Drag Drawing Canvas"
-        >
-          <Move className="w-4 h-4" />
-          <span>Pan / Move</span>
-        </button>
-
-        {/* Delete Balloon Button - Visible when a balloon is selected */}
-        {selectedBalloonId && (
+      {/* Tool Selection & Auto Detect */}
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-950 p-1 rounded-xl border border-slate-300 dark:border-slate-800">
           <button
-            onClick={() => deleteSelectedBalloon()}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold shadow-md shadow-rose-500/20 transition-all animate-pulse"
-            title="Delete Selected Balloon (Press Delete key)"
+            onClick={() => setActiveTool('SELECT')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              activeTool === 'SELECT'
+                ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
+                : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
+            }`}
+            title="Select & Move Balloon"
           >
-            <Trash2 className="w-4 h-4" />
-            <span>Delete Balloon</span>
+            <MousePointer className="w-4 h-4" />
+            <span>Select</span>
           </button>
-        )}
+
+          <button
+            onClick={() => setActiveTool('BALLOON')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              activeTool === 'BALLOON'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-500/20'
+                : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
+            }`}
+            title="Click drawing to add balloon"
+          >
+            <CircleDot className="w-4 h-4" />
+            <span>Add Balloon</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTool('PAN')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              activeTool === 'PAN'
+                ? 'bg-purple-600 text-white shadow-md shadow-purple-500/20'
+                : 'text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800'
+            }`}
+            title="Pan & Drag Drawing Canvas"
+          >
+            <Move className="w-4 h-4" />
+            <span>Pan / Move</span>
+          </button>
+
+          {/* Delete Balloon Button */}
+          {selectedBalloonId && (
+            <button
+              onClick={() => deleteSelectedBalloon()}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold shadow-md shadow-rose-500/20 transition-all animate-pulse"
+              title="Delete Selected Balloon (Press Delete key)"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>Delete Balloon</span>
+            </button>
+          )}
+        </div>
+
+        {/* Prominent Auto Detect All Button */}
+        <button
+          onClick={handleAutoDetect}
+          disabled={isDetecting}
+          className="flex items-center gap-2 px-3.5 py-2 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-400 hover:to-orange-500 text-white text-xs font-extrabold rounded-xl shadow-md shadow-amber-500/20 transition-all disabled:opacity-50"
+          title="Automatically detect and balloon all dimensions on this drawing page"
+        >
+          {isDetecting ? (
+            <RefreshCw className="w-4 h-4 animate-spin" />
+          ) : (
+            <Sparkles className="w-4 h-4" />
+          )}
+          <span>Auto Detect All</span>
+        </button>
       </div>
 
       {/* Page Navigation */}

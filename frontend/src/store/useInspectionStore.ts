@@ -41,6 +41,7 @@ interface InspectionStore {
   setOnlineCollaborators: (users: User[]) => void;
   openManualFallbackModal: (coord: ManualPendingCoord) => void;
   closeManualFallbackModal: () => void;
+  autoDetectAllBalloons: () => Promise<any>;
 }
 
 export const useInspectionStore = create<InspectionStore>((set, get) => ({
@@ -130,5 +131,26 @@ export const useInspectionStore = create<InspectionStore>((set, get) => ({
     }),
   setOnlineCollaborators: (users: User[]) => set({ onlineCollaborators: users }),
   openManualFallbackModal: (coord) => set({ manualFallbackModalOpen: true, manualPendingCoord: coord }),
-  closeManualFallbackModal: () => set({ manualFallbackModalOpen: false, manualPendingCoord: null })
+  closeManualFallbackModal: () => set({ manualFallbackModalOpen: false, manualPendingCoord: null }),
+  autoDetectAllBalloons: async () => {
+    const session = get().activeSession;
+    const page = get().currentPage;
+    if (!session) return { count: 0, message: 'No active session' };
+
+    try {
+      const res = await api.post('/balloons/auto-detect', {
+        inspectionSessionId: session.id,
+        pageNumber: page
+      });
+      if (res.data.balloons && res.data.balloons.length > 0) {
+        const existing = get().balloons;
+        const newBalloons = res.data.balloons.filter((nb: Balloon) => !existing.some(eb => eb.id === nb.id));
+        set({ balloons: [...existing, ...newBalloons] });
+      }
+      return res.data;
+    } catch (err: any) {
+      console.error('Failed to auto detect balloons:', err);
+      throw err;
+    }
+  }
 }));

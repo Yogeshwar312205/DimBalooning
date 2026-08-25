@@ -2,18 +2,40 @@ import fitz  # PyMuPDF
 import re
 from typing import Dict, Any, Optional
 
+_ocr_reader = None
+
+def get_ocr_reader():
+    global _ocr_reader
+    if _ocr_reader is None:
+        try:
+            import easyocr
+            _ocr_reader = easyocr.Reader(['en'], gpu=False)
+        except Exception as e:
+            print("EasyOCR initialization failed:", e)
+            _ocr_reader = False
+    return _ocr_reader if _ocr_reader is not False else None
+
+
 def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
     """
     Parses dimension text string into nominal, upper tolerance, lower tolerance, unit, and prefix.
-    Examples:
-        '25 ± 0.10' -> nominal=25.0, upper=0.10, lower=-0.10
-        '25 +0.10/-0.20' -> nominal=25.0, upper=0.10, lower=-0.20
-        'Ø25 ±0.1' -> nominal=25.0, upper=0.1, lower=-0.1, prefix='Ø'
-        'R10.5 ±0.05' -> nominal=10.5, upper=0.05, lower=-0.05, prefix='R'
-        '50.0' -> nominal=50.0, upper=0.0, lower=0.0
+    Filters out metadata text (dates, part numbers, titles, ECN, ISO).
     """
-    clean_text = text.strip()
+    if not text:
+        return None
+
+    clean_text = text.replace(',', '.').strip()
     if not clean_text:
+        return None
+
+    # Filter out title block / metadata keywords
+    upper_raw = clean_text.upper()
+    skip_keywords = ["ECN", "DATE", "DRAWING", "VERSION", "MODEL", "PAGE", "SHEET", "REV", "ISO", "ART", "PART", "SCALE", "AUTHOR", "CHECKED", "DOC", "TITLE", "COPYRIGHT", "DOKUMENT"]
+    if any(kw in upper_raw for kw in skip_keywords):
+        return None
+
+    # Ignore dates like 13.10.2023 or 22/11/2022
+    if re.search(r'\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}', clean_text):
         return None
 
     # Detect prefix (Ø, R, M, etc.)
@@ -76,10 +98,14 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
             "extractionMode": "AUTOMATIC"
         }
 
-    # Pattern 4: Simple nominal number e.g. 25 or 25.00
+    # Pattern 4: Simple nominal number e.g. 25 or 25.00 or 116.18
     nom_match = re.search(r'^([0-9]+(?:\.[0-9]+)?)', clean_text)
     if nom_match:
         nominal = float(nom_match.group(1))
+        # Ignore huge numbers like part numbers (e.g. 13523526)
+        if nominal > 9999 or nominal == 0:
+            return None
+
         return {
             "found": True,
             "rawText": text.strip(),
@@ -119,15 +145,12 @@ def extract_text_at_coordinate(file_path: str, page_number: int, norm_x: float, 
             min(rect.height, pdf_y + search_radius)
         )
 
-        # Get words inside/intersecting search_rect
         words = page.get_text("words", clip=search_rect)
         if not words:
-            # Fallback: get all text blocks on page and find closest
             blocks = page.get_text("blocks")
             closest_text = ""
             min_dist = float('inf')
             for b in blocks:
-                # b = (x0, y0, x1, y1, "text", block_no, block_type)
                 cx = (b[0] + b[2]) / 2.0
                 cy = (b[1] + b[3]) / 2.0
                 dist = ((cx - pdf_x) ** 2 + (cy - pdf_y) ** 2) ** 0.5
@@ -136,7 +159,6 @@ def extract_text_at_coordinate(file_path: str, page_number: int, norm_x: float, 
                     closest_text = b[4]
             raw_text = closest_text.strip()
         else:
-            # Sort words by y0 then x0
             words.sort(key=lambda w: (w[1], w[0]))
             raw_text = " ".join([w[4] for w in words])
 
@@ -157,6 +179,135 @@ def extract_text_at_coordinate(file_path: str, page_number: int, norm_x: float, 
             "extractionMode": "MANUAL_FALLBACK",
             "error": str(e)
         }
+
+
+def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Dict[str, Any]:
+    """
+    Scans entire PDF page and automatically finds all dimension callouts with tolerances.
+    Uses Hybrid approach: PyMuPDF vector blocks + EasyOCR fallback for scanned/image drawings.
+    """
+    try:
+        doc = fitz.open(file_path)
+        if page_number < 1 or page_number > len(doc):
+            return {"success": False, "error": "Invalid page number", "items": []}
+
+        page = doc[page_number - 1]
+        rect = page.rect
+        width = rect.width
+        height = rect.height
+
+        detected = []
+        seen_coords = set()
+
+        # 1. Stage 1: Vector Text Extraction via PyMuPDF
+        blocks = page.get_text("blocks")
+        for b in blocks:
+            text = b[4].strip()
+            if not text:
+                continue
+
+            lines = text.split('\n')
+            for line in lines:
+                clean_line = line.strip()
+                if not clean_line:
+                    continue
+
+                parsed = parse_dimension_string(clean_line)
+                if parsed and parsed.get("found"):
+                    x0, y0, x1, y1 = b[0], b[1], b[2], b[3]
+                    cx = (x0 + x1) / 2.0
+                    cy = (y0 + y1) / 2.0
+                    norm_x = round(cx / width, 4)
+                    norm_y = round(cy / height, 4)
+
+                    coord_key = (round(norm_x, 2), round(norm_y, 2))
+                    if coord_key in seen_coords:
+                        continue
+                    seen_coords.add(coord_key)
+
+                    detected.append({
+                        "normX": norm_x,
+                        "normY": norm_y,
+                        "rawText": parsed["rawText"],
+                        "nominalValue": parsed["nominalValue"],
+                        "upperTolerance": parsed["upperTolerance"],
+                        "lowerTolerance": parsed["lowerTolerance"],
+                        "unit": parsed["unit"],
+                        "prefix": parsed.get("prefix", ""),
+                        "extractionMode": "VECTOR_AUTOMATIC"
+                    })
+
+        # 2. Stage 2: OCR Fallback for Scanned / Raster Image PDF Drawings
+        if len(detected) == 0:
+            reader = get_ocr_reader()
+            if reader:
+                pix = page.get_pixmap(dpi=120)
+                try:
+                    from PIL import Image
+                    import io
+                    pil_img = Image.open(io.BytesIO(pix.tobytes("png")))
+                    w, h = pil_img.size
+                    max_dim = 1100
+                    if max(w, h) > max_dim:
+                        scale = max_dim / float(max(w, h))
+                        new_w, new_h = int(w * scale), int(h * scale)
+                        pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+                    buf = io.BytesIO()
+                    pil_img.save(buf, format="PNG")
+                    img_bytes = buf.getvalue()
+                    img_w, img_h = pil_img.size
+                except Exception as img_err:
+                    print("Image resize fallback error:", img_err)
+                    img_bytes = pix.tobytes("png")
+                    img_w, img_h = pix.width, pix.height
+
+                ocr_results = reader.readtext(img_bytes)
+
+                for bbox, text, prob in ocr_results:
+                    if prob < 0.3 or not text or not any(char.isdigit() for char in text):
+                        continue
+
+                    parsed = parse_dimension_string(text)
+                    if parsed and parsed.get("found"):
+                        # bbox format: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+                        xs = [p[0] for p in bbox]
+                        ys = [p[1] for p in bbox]
+                        cx = sum(xs) / len(xs)
+                        cy = sum(ys) / len(ys)
+
+                        norm_x = round(float(cx) / img_w, 4)
+                        norm_y = round(float(cy) / img_h, 4)
+
+                        # Skip title block area & bottom revision table
+                        if (norm_x > 0.70 and norm_y > 0.75) or norm_y > 0.85:
+                            continue
+
+                        coord_key = (round(norm_x, 2), round(norm_y, 2))
+                        if coord_key in seen_coords:
+                            continue
+                        seen_coords.add(coord_key)
+
+                        detected.append({
+                            "normX": norm_x,
+                            "normY": norm_y,
+                            "rawText": parsed["rawText"],
+                            "nominalValue": parsed["nominalValue"],
+                            "upperTolerance": parsed["upperTolerance"],
+                            "lowerTolerance": parsed["lowerTolerance"],
+                            "unit": parsed["unit"],
+                            "prefix": parsed.get("prefix", ""),
+                            "extractionMode": "OCR_AUTOMATIC"
+                        })
+
+        return {
+            "success": True,
+            "count": len(detected),
+            "items": detected
+        }
+    except Exception as e:
+        print("extract_all_dimensions_from_page error:", e)
+        return {"success": False, "error": str(e), "items": []}
 
 
 def get_pdf_metadata(file_path: str) -> Dict[str, Any]:
