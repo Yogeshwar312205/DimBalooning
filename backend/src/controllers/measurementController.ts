@@ -1,12 +1,9 @@
-import { Response } from 'express';
-import { AuthRequest } from '../middleware/authMiddleware';
-import { PrismaClient } from '@prisma/client';
+import { Request, Response } from 'express';
+import prisma from '../utils/prisma';
 import { calculateTolerance } from '../utils/toleranceCalculator';
 import { broadcastToInspectionSession } from '../websocket/socketHandler';
 
-const prisma = new PrismaClient();
-
-export async function updateMeasurement(req: AuthRequest, res: Response) {
+export async function updateMeasurement(req: Request, res: Response) {
   try {
     const { id } = req.params;
     const {
@@ -33,7 +30,6 @@ export async function updateMeasurement(req: AuthRequest, res: Response) {
     const lowerTol = lowerTolerance !== undefined ? lowerTolerance : existingMeasurement.lowerTolerance;
     const actual = actualValue !== undefined ? (actualValue === null || actualValue === '' ? null : Number(actualValue)) : existingMeasurement.actualValue;
 
-    // Run deterministic tolerance calculation
     const calcResult = calculateTolerance(nominal, upperTol, lowerTol, actual);
 
     const updatedMeasurement = await prisma.measurement.update({
@@ -48,16 +44,13 @@ export async function updateMeasurement(req: AuthRequest, res: Response) {
         actualValue: actual,
         lowerLimit: calcResult.lowerLimit,
         upperLimit: calcResult.upperLimit,
-        status: calcResult.status,
-        updatedById: req.user!.id
+        status: calcResult.status
       },
       include: {
-        balloon: true,
-        updatedBy: { select: { id: true, name: true } }
+        balloon: true
       }
     });
 
-    // Broadcast update via WebSockets
     broadcastToInspectionSession(existingMeasurement.balloon.inspectionSessionId, 'MEASUREMENT_UPDATED', {
       measurement: updatedMeasurement,
       balloonId: existingMeasurement.balloonId,
@@ -75,7 +68,7 @@ export async function updateMeasurement(req: AuthRequest, res: Response) {
   }
 }
 
-export async function saveMeasurement(req: AuthRequest, res: Response) {
+export async function saveMeasurement(req: Request, res: Response) {
   try {
     const {
       balloonId,
@@ -124,12 +117,10 @@ export async function saveMeasurement(req: AuthRequest, res: Response) {
           actualValue: actual,
           lowerLimit: calcResult.lowerLimit,
           upperLimit: calcResult.upperLimit,
-          status: calcResult.status,
-          updatedById: req.user!.id
+          status: calcResult.status
         },
         include: {
-          balloon: true,
-          updatedBy: { select: { id: true, name: true } }
+          balloon: true
         }
       });
     } else {
@@ -144,12 +135,10 @@ export async function saveMeasurement(req: AuthRequest, res: Response) {
           upperLimit: calcResult.upperLimit,
           actualValue: actual,
           unit: unit || 'mm',
-          status: calcResult.status,
-          updatedById: req.user!.id
+          status: calcResult.status
         },
         include: {
-          balloon: true,
-          updatedBy: { select: { id: true, name: true } }
+          balloon: true
         }
       });
     }

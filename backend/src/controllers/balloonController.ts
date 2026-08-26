@@ -1,11 +1,9 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma';
 import path from 'path';
 import { extractDimensionFromPdf, autoExtractDimensionsFromPdf } from '../services/pdfServiceConnector';
 import { calculateTolerance } from '../utils/toleranceCalculator';
 import { broadcastToInspectionSession } from '../websocket/socketHandler';
-
-const prisma = new PrismaClient();
 
 export async function autoExtractBalloons(req: Request, res: Response) {
   try {
@@ -29,7 +27,6 @@ export async function autoExtractBalloons(req: Request, res: Response) {
 
     const drawingPath = path.resolve(session.drawing.filePath);
 
-    // Call Python Smart Tri-Engine
     const extractionResult = await autoExtractDimensionsFromPdf({
       filePath: drawingPath,
       pageNumber
@@ -48,7 +45,6 @@ export async function autoExtractBalloons(req: Request, res: Response) {
 
     const createdBalloons: any[] = [];
 
-    // Save each extracted dimension into DB
     for (const item of items) {
       const anchorX = item.normX !== undefined ? item.normX : (item.x ?? 0.5);
       const anchorY = item.normY !== undefined ? item.normY : (item.y ?? 0.5);
@@ -99,7 +95,6 @@ export async function autoExtractBalloons(req: Request, res: Response) {
       currentBalloonNum++;
     }
 
-    // Broadcast WebSocket event
     broadcastToInspectionSession(sessionId, 'BALLOONS_AUTO_EXTRACTED', {
       sessionId,
       balloons: createdBalloons,

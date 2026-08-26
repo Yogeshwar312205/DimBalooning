@@ -61,7 +61,11 @@ function calculateSpiralBalloonPosition(
  */
 async function processExtractionInBackground(sessionId: string, filePath: string, drawingName: string) {
   try {
-    console.log(`[Background-Worker] Starting auto-extraction for session: ${sessionId}...`);
+    console.log(`\n======================================================`);
+    console.log(`🚀 [Background-Worker] Auto-Extraction Triggered for: "${drawingName}"`);
+    console.log(`📄 [Background-Worker] PDF File: ${path.basename(filePath)}`);
+    console.log(`======================================================`);
+
     const absolutePath = path.resolve(filePath);
 
     const extractionResult = await autoExtractDimensionsFromPdf({
@@ -127,15 +131,16 @@ async function processExtractionInBackground(sessionId: string, filePath: string
       balloonNum++;
     }
 
-    console.log(`[Background-Worker] Successfully created ${createdBalloons.length} balloons for ${drawingName}`);
+    console.log(`✅ [Background-Worker] Successfully saved & placed ${createdBalloons.length} balloons via ${extractionResult.engine || 'Smart Router'}`);
+    console.log(`⚡ [Background-Worker] Broadcasting auto-sync to WebSocket session: ${sessionId}\n`);
 
-    // Real-Time WebSocket Broadcast: Auto-hydrates the canvas in 0.01 seconds
+    // Real-Time WebSocket Broadcast
     broadcastToInspectionSession(sessionId, 'BALLOONS_AUTO_EXTRACTED', {
       balloons: createdBalloons
     });
 
   } catch (err: any) {
-    console.error(`[Background-Worker Error] Failed background extraction for ${sessionId}:`, err?.message || err);
+    console.error(`❌ [Background-Worker Error] Failed extraction for ${sessionId}:`, err?.message || err);
   }
 }
 
@@ -179,7 +184,7 @@ export async function uploadDrawing(req: Request, res: Response) {
     // 4. Fire-and-forget background extraction (Non-blocking)
     processExtractionInBackground(session.id, req.file.path, drawing.name);
 
-    // 5. Send immediate response (<200ms) so the UI navigates instantly to canvas
+    // 5. Send immediate response (<200ms)
     return res.status(201).json({
       message: 'Drawing uploaded successfully. Extraction started in background.',
       drawing,
@@ -218,12 +223,10 @@ export async function extractDrawing(req: Request, res: Response) {
       });
     }
 
-    // Clear old balloons
     await prisma.balloon.deleteMany({
       where: { inspectionSessionId: session.id }
     });
 
-    // Trigger synchronous deep AI scan when explicitly requested by user
     const absolutePath = path.resolve(drawing.filePath);
     const extractionResult = await autoExtractDimensionsFromPdf({
       filePath: absolutePath,
@@ -284,7 +287,6 @@ export async function extractDrawing(req: Request, res: Response) {
       balloonNum++;
     }
 
-    // Broadcast updated balloons to the canvas in real-time
     broadcastToInspectionSession(session.id, 'BALLOONS_AUTO_EXTRACTED', {
       balloons: createdBalloons
     });
