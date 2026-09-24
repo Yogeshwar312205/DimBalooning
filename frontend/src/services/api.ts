@@ -22,7 +22,14 @@ api.interceptors.request.use(
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response && error.response.status === 401) {
+    if (
+      error.response &&
+      (error.response.status === 401 ||
+        (error.response.status === 403 &&
+          (error.response.data?.error?.toLowerCase().includes('token') ||
+            error.response.data?.error?.toLowerCase().includes('expired') ||
+            error.response.data?.error?.toLowerCase().includes('access denied'))))
+    ) {
       localStorage.removeItem('dim_ballooning_token');
       localStorage.removeItem('dim_ballooning_user');
       if (window.location.pathname !== '/login') {

@@ -34,8 +34,9 @@ export const Drawings: React.FC = () => {
     try {
       const res = await api.get('/drawings');
       setDrawings(res.data.drawings);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to fetch drawings:', err);
+      setError(err?.response?.data?.error || 'Failed to fetch drawings library');
     } finally {
       setLoading(false);
     }
@@ -118,6 +119,13 @@ export const Drawings: React.FC = () => {
           <span>Upload PDF Drawing</span>
         </button>
       </div>
+
+      {error && !uploadModalOpen && (
+        <div className="p-4 bg-rose-950/80 border border-rose-800 text-rose-300 rounded-2xl text-xs flex justify-between items-center">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="text-rose-400 hover:text-white font-bold ml-4">Dismiss</button>
+        </div>
+      )}
 
       {/* Drawings Grid */}
       {loading ? (
