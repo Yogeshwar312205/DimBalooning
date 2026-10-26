@@ -269,7 +269,13 @@ export async function autoDetectBalloons(req: AuthRequest, res: Response) {
       y: b.leaderStartY ?? b.y
     }));
 
-    let currentMaxNum = existingBalloons.length > 0 ? Math.max(...existingBalloons.map(b => b.balloonNumber)) : 0;
+    // FIX: Query ALL balloons across ALL pages to maintain global sequential numbering
+    const allBalloonsInSession = await prisma.balloon.findMany({
+      where: { inspectionSessionId },
+      select: { balloonNumber: true }
+    });
+
+    let currentMaxNum = allBalloonsInSession.length > 0 ? Math.max(...allBalloonsInSession.map(b => b.balloonNumber)) : 0;
     const createdBalloons = [];
     
     // MODIFIED: Adjusted confidence filtering for dense drawings
