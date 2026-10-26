@@ -1,6 +1,6 @@
 import fitz  # PyMuPDF
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 _ocr_reader = None
 
@@ -16,10 +16,136 @@ def get_ocr_reader():
     return _ocr_reader if _ocr_reader is not False else None
 
 
+def detect_title_block_region(page: Any, width: float, height: float) -> Dict[str, Any]:
+    """
+    Detects title block region using text density analysis and common keywords.
+    Returns normalized boundary coordinates.
+    """
+    # Common title block keywords (case-insensitive)
+    title_keywords = [
+        "TITLE", "DWG", "DRAWING", "PART", "MATERIAL", "SCALE", "DATE", "DRAWN", 
+        "CHECKED", "APPROVED", "REVISION", "REV", "SHEET", "PAGE", "PROJECT", 
+        "CLIENT", "DESIGNED", "ENGINEER", "ARCHITECT", "FILE", "DWG NO", "PART NO"
+    ]
+    
+    # Analyze text blocks
+    blocks = page.get_text("blocks")
+    title_block_candidates = []
+    
+    for b in blocks:
+        if len(b) < 5:
+            continue
+        x0, y0, x1, y1 = b[0], b[1], b[2], b[3]
+        text = b[4] if len(b) > 4 else ""
+        
+        # Normalize coordinates
+        norm_x = (x0 + x1) / (2 * width)
+        norm_y = (y0 + y1) / (2 * height)
+        
+        # Check if text contains title block keywords
+        text_upper = text.upper()
+        keyword_count = sum(1 for kw in title_keywords if kw in text_upper)
+        
+        if keyword_count >= 2:  # At least 2 keywords suggest title block
+            title_block_candidates.append({
+                "x0": x0 / width,
+                "y0": y0 / height,
+                "x1": x1 / width,
+                "y1": y1 / height,
+                "keyword_count": keyword_count
+            })
+    
+    # If we found candidates, determine bounding region
+    if title_block_candidates:
+        # Sort by keyword density and take the most likely region
+        title_block_candidates.sort(key=lambda c: c["keyword_count"], reverse=True)
+        best = title_block_candidates[0]
+        
+        # Expand region slightly to capture full title block
+        return {
+            "x0": max(0, best["x0"] - 0.05),
+            "y0": max(0, best["y0"] - 0.05),
+            "x1": min(1, best["x1"] + 0.05),
+            "y1": min(1, best["y1"] + 0.05),
+            "confidence": min(1.0, best["keyword_count"] / 5.0)
+        }
+    
+    # Fallback: assume bottom-right corner (traditional position)
+    return {
+        "x0": 0.65,
+        "y0": 0.85,
+        "x1": 1.0,
+        "y1": 1.0,
+        "confidence": 0.3  # Low confidence fallback
+    }
+
+
+def detect_view_regions(page: Any, width: float, height: float) -> List[Dict[str, Any]]:
+    """
+    Detects drawing view regions by identifying section labels and detail callouts.
+    Returns list of view regions with IDs.
+    """
+    view_regions = []
+    blocks = page.get_text("blocks")
+    
+    # Patterns for section labels: "SECTION A-A", "VIEW B-B", "DETAIL C", etc.
+    section_pattern = re.compile(r'(SECTION|VIEW|DETAIL|DET\.?|SEC\.?)\s*([A-Z](?:-[A-Z])?)', re.IGNORECASE)
+    
+    for b in blocks:
+        if len(b) < 5:
+            continue
+        text = b[4] if len(b) > 4 else ""
+        match = section_pattern.search(text)
+        
+        if match:
+            view_type = match.group(1).upper()
+            view_label = match.group(2).upper()
+            
+            # Store view region (rough approximation - real implementation would be more sophisticated)
+            x0, y0, x1, y1 = b[0], b[1], b[2], b[3]
+            view_regions.append({
+                "id": f"{view_type}_{view_label}",
+                "label": f"{view_type} {view_label}",
+                "type": view_type,
+                "center_x": ((x0 + x1) / 2) / width,
+                "center_y": ((y0 + y1) / 2) / height
+            })
+    
+    return view_regions
+
+
+def is_in_title_block(norm_x: float, norm_y: float, title_block: Dict[str, Any]) -> bool:
+    """Check if point is within title block region."""
+    return (title_block["x0"] <= norm_x <= title_block["x1"] and 
+            title_block["y0"] <= norm_y <= title_block["y1"])
+
+
+def identify_view_for_point(norm_x: float, norm_y: float, view_regions: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    Identify which view a dimension point belongs to based on proximity to view labels.
+    Returns view ID or None for main drawing.
+    """
+    if not view_regions:
+        return None
+    
+    # Find closest view label
+    min_dist = float('inf')
+    closest_view = None
+    
+    for view in view_regions:
+        dist = ((norm_x - view["center_x"]) ** 2 + (norm_y - view["center_y"]) ** 2) ** 0.5
+        if dist < min_dist and dist < 0.3:  # Within 30% of page size
+            min_dist = dist
+            closest_view = view["id"]
+    
+    return closest_view
+
+
 def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
     """
     Parses dimension text string into nominal, upper tolerance, lower tolerance, unit, and prefix.
     Filters out metadata text, general notes, item numbers, beam/column labels, and non-dimension CAD text.
+    Returns classification metadata including confidence and dimension type.
     """
     if not text:
         return None
@@ -30,7 +156,7 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
 
     upper_raw = clean_text.upper()
 
-    # Skip general note titles, text specifications & CAD non-dimension keywords
+    # ENHANCED: Expanded metadata and non-dimension keyword filtering
     skip_keywords = [
         "ECN", "DATE", "DRAWING", "VERSION", "MODEL", "PAGE", "SHEET", "REV", "ISO", "ART", "PART", 
         "SCALE", "AUTHOR", "CHECKED", "DOC", "TITLE", "COPYRIGHT", "DOKUMENT", "TERRACE", "BEAM", 
@@ -38,34 +164,154 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
         "DETAILS", "CONSTRUCTION", "THICKNESS", "STAIRCASE", "RISER", "TREAD", "PLINTH", "EXPOSURE", 
         "CONDITION", "GRADE", "CONCRETE", "STEEL", "BRICK", "COLUMN", "PROJECT", "CLIENT", "ARCHITECT",
         "ENGINEER", "REVISION", "NOTE", "NORTH", "BELOW", "WALL", "HEIGHT", "THK", "PCC", "FLOORING",
-        "INTERNAL", "EXTERNAL", "FRAME", "FRAMED", "COBA", "BAT", "FINISH", "DOG", "LEGGED", "TYPE"
+        "INTERNAL", "EXTERNAL", "FRAME", "FRAMED", "COBA", "BAT", "FINISH", "DOG", "LEGGED", "TYPE",
+        # ADDED: Common title block and annotation keywords
+        "DESIGNED", "DRAWN", "APPROVED", "MATERIAL", "FINISH", "TREATMENT", "QUANTITY", "QTY", 
+        "ITEM", "REF", "DESCRIPTION", "WEIGHT", "MASS", "SPECIFICATION", "STANDARD", "TOLERANCE",
+        "UNLESS", "OTHERWISE", "SPECIFIED", "GENERAL", "ANGULAR", "DIMENSION", "INTERPRET", "THIRD",
+        "ANGLE", "PROJECTION", "UNITS", "MILLIMETERS", "INCHES", "SURFACE", "ROUGHNESS", "FILE",
+        "PROPERTY", "COMPANY", "ADDRESS", "PHONE", "EMAIL", "STATUS", "REVISION", "CHANGE"
     ]
     if any(kw in upper_raw for kw in skip_keywords):
         return None
 
-    # Ignore multi-word text blocks (sentences/notes)
-    if len(clean_text.split()) > 3:
+    # ENHANCED: Ignore multi-word text blocks (sentences/notes) - increased threshold
+    if len(clean_text.split()) > 5:
         return None
 
     # Ignore dates like 13.10.2023 or 22/11/2022
     if re.search(r'\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}', clean_text):
         return None
 
-    # Ignore CAD element IDs like B1, B4, B8, B12, S1, S2, S3, C-01, C-09, BR2, BR4, RB, MLB
-    if re.match(r'^(B|S|C|BR|RB|MLB|C-)\d*$', upper_raw):
+    # ENHANCED: Expanded CAD element ID filtering
+    # Includes section labels (SECTION A-A, VIEW B-B, DETAIL C)
+    if re.match(r'^(SECTION|VIEW|DETAIL|DET\.?|SEC\.?)\s*[A-Z]', upper_raw):
+        return None
+    
+    # Element IDs like B1, B4, B8, B12, S1, S2, S3, C-01, C-09, BR2, BR4, RB, MLB
+    if re.match(r'^[A-Z]{1,3}-?\d+$', upper_raw) and len(upper_raw) <= 6:
+        return None
+
+    # ADDED: Filter revision markers (REV A, REV. B, R1, R2, etc.)
+    if re.match(r'^(REV\.?|R\.?)\s*[A-Z0-9]$', upper_raw):
         return None
 
     # Strip list item prefixes like "1. ", "4. ", "10) ", "3. " at start of text (excluding decimals like 3.67)
     clean_text = re.sub(r'^\d+[\.\)](?!\d)\s*', '', clean_text).strip()
     if not clean_text:
         return None
+    
+    # ADDED: Filter common drawing scale notations (1:1, 1:2, 2:1, SCALE 1:5, etc.)
+    if re.match(r'^(SCALE\s*)?(\d+:\d+|\d+/\d+)$', upper_raw):
+        return None
 
-    # Detect prefix (Ø, R, M, etc.)
+    # ENHANCED: Detect prefix (Ø, R, M, etc.) with more symbol variations
     prefix = ""
-    prefix_match = re.match(r'^([ØøRM]|SR|SØ|SQ)?\s*', clean_text, re.IGNORECASE)
-    if prefix_match and prefix_match.group(1):
-        prefix = prefix_match.group(1).upper()
-        clean_text = clean_text[prefix_match.end():].strip()
+    dimension_type = "LINEAR"  # Default type
+    
+    # Handle diameter symbols: Ø, ⌀, DIA, dia., φ, PHI
+    if re.match(r'^([ØøΦφ⌀]|DIA\.?|PHI)\s*', clean_text, re.IGNORECASE):
+        prefix = "Ø"
+        dimension_type = "DIAMETER"
+        clean_text = re.sub(r'^([ØøΦφ⌀]|DIA\.?|PHI)\s*', '', clean_text, flags=re.IGNORECASE).strip()
+    # Handle radius: R, RAD, rad.
+    elif re.match(r'^(R|RAD\.?)\s*([0-9])', clean_text, re.IGNORECASE):  # Must be followed by digit
+        prefix = "R"
+        dimension_type = "RADIUS"
+        clean_text = re.sub(r'^(R|RAD\.?)\s*', '', clean_text, flags=re.IGNORECASE).strip()
+    # Handle thread: M followed by digit
+    elif re.match(r'^M\s*([0-9])', clean_text):
+        prefix = "M"
+        dimension_type = "THREAD"
+        clean_text = re.sub(r'^M\s*', '', clean_text).strip()
+    # Handle square: SQ, □
+    elif re.match(r'^(SQ|□)\s*', clean_text, re.IGNORECASE):
+        prefix = "SQ"
+        dimension_type = "SQUARE"
+        clean_text = re.sub(r'^(SQ|□)\s*', '', clean_text, flags=re.IGNORECASE).strip()
+    # Handle spherical diameter/radius
+    elif re.match(r'^(SR|SØ|S[ØΦφ])\s*', clean_text, re.IGNORECASE):
+        prefix_match = re.match(r'^(S[RØΦφ⌀])\s*', clean_text, re.IGNORECASE)
+        prefix = prefix_match.group(1).upper() if prefix_match else "SR"
+        dimension_type = "SPHERICAL"
+        clean_text = re.sub(r'^(SR|SØ|S[ØΦφ⌀])\s*', '', clean_text, flags=re.IGNORECASE).strip()
+    
+    # ADDED: Detect reference dimensions (in parentheses) - mark but don't filter
+    is_reference = False
+    ref_match = re.match(r'^\((.+)\)$', clean_text)
+    if ref_match:
+        is_reference = True
+        clean_text = ref_match.group(1).strip()
+        # Re-check for prefix inside parentheses
+        if re.match(r'^([ØøΦφ⌀]|DIA\.?)\s*', clean_text, re.IGNORECASE):
+            prefix = "Ø"
+            dimension_type = "DIAMETER"
+            clean_text = re.sub(r'^([ØøΦφ⌀]|DIA\.?)\s*', '', clean_text, flags=re.IGNORECASE).strip()
+        elif re.match(r'^(R|RAD\.?)\s*([0-9])', clean_text, re.IGNORECASE):
+            prefix = "R"
+            dimension_type = "RADIUS"
+            clean_text = re.sub(r'^(R|RAD\.?)\s*', '', clean_text, flags=re.IGNORECASE).strip()
+
+    # ADDED: Pattern 0.5: ISO Tolerance Fits (e.g., 50 H7, 25 f8, Ø30 H7 +0.025, M20 h6)
+    fit_match = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*([A-HJKMNPRSTUVXYZa-hjkmnprstuvxyz]\d+)\s*([\+\-][0-9]+(?:\.[0-9]+)?(?:\s*[\/\s]\s*[\+\-][0-9]+(?:\.[0-9]+)?)?)?', clean_text)
+    if fit_match:
+        nominal = float(fit_match.group(1))
+        fit_class = fit_match.group(2)  # e.g., "H7", "f8", "h6"
+        explicit_tol = fit_match.group(3)  # Optional explicit tolerance after fit class
+        
+        # Parse explicit tolerance if provided
+        upper_tol = 0.0
+        lower_tol = 0.0
+        if explicit_tol:
+            tol_match = re.search(r'([\+\-][0-9]+(?:\.[0-9]+)?)\s*[\/\s]?\s*([\+\-][0-9]+(?:\.[0-9]+)?)?', explicit_tol)
+            if tol_match:
+                tol1 = float(tol_match.group(1))
+                tol2 = float(tol_match.group(2)) if tol_match.group(2) else -tol1
+                upper_tol = max(tol1, tol2)
+                lower_tol = min(tol1, tol2)
+        
+        return {
+            "found": True,
+            "rawText": text.strip(),
+            "nominalValue": nominal,
+            "upperTolerance": upper_tol,
+            "lowerTolerance": lower_tol,
+            "unit": "mm",
+            "prefix": prefix,
+            "dimensionType": dimension_type,
+            "fitClass": fit_class,
+            "isReference": is_reference,
+            "confidence": 0.9,  # High confidence for ISO fits
+            "extractionMode": "AUTOMATIC"
+        }
+
+    # ADDED: Pattern 0.6: Limit Dimensions (e.g., 50.025/50.000, 25.1/24.9)
+    # Must have decimal points to distinguish from scales like 1/2
+    limit_match = re.search(r'([0-9]+\.[0-9]+)\s*/\s*([0-9]+\.[0-9]+)', clean_text)
+    if limit_match:
+        limit1 = float(limit_match.group(1))
+        limit2 = float(limit_match.group(2))
+        upper_limit = max(limit1, limit2)
+        lower_limit = min(limit1, limit2)
+        nominal = (upper_limit + lower_limit) / 2.0
+        upper_tol = upper_limit - nominal
+        lower_tol = lower_limit - nominal
+        
+        if 0 < nominal <= 9999:
+            return {
+                "found": True,
+                "rawText": text.strip(),
+                "nominalValue": nominal,
+                "upperTolerance": upper_tol,
+                "lowerTolerance": lower_tol,
+                "unit": "mm",
+                "prefix": prefix,
+                "dimensionType": dimension_type,
+                "isReference": is_reference,
+                "isLimitDimension": True,
+                "confidence": 0.95,
+                "extractionMode": "AUTOMATIC"
+            }
 
     # Pattern 0: Explicit assignment e.g. "HEIGHT = 2.77M" or "THICKNESS = 230MM" or "RISER = 170MM"
     assign_match = re.search(r'[=:]\s*([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z"\'°]+)?', clean_text)
@@ -81,10 +327,13 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
                 "lowerTolerance": 0.0,
                 "unit": unit,
                 "prefix": prefix,
+                "dimensionType": "NOTE",  # Explicit assignments are usually notes
+                "isReference": is_reference,
+                "confidence": 0.5,  # Lower confidence - might be note, not inspection dimension
                 "extractionMode": "AUTOMATIC"
             }
 
-    # Pattern 1: Symmetric tolerance e.g., 25 ± 0.1 or 25±0.10
+    # Pattern 1: Symmetric tolerance e.g., 25 ± 0.1 or 25±0.10 or 25 +/- 0.1
     sym_match = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*(?:±|\+/-|\+-)\s*([0-9]+(?:\.[0-9]+)?)', clean_text)
     if sym_match:
         nominal = float(sym_match.group(1))
@@ -97,6 +346,9 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
             "lowerTolerance": -tol,
             "unit": "mm",
             "prefix": prefix,
+            "dimensionType": dimension_type,
+            "isReference": is_reference,
+            "confidence": 0.95,  # High confidence for symmetric tolerances
             "extractionMode": "AUTOMATIC"
         }
 
@@ -116,6 +368,9 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
             "lowerTolerance": lower_tol,
             "unit": "mm",
             "prefix": prefix,
+            "dimensionType": dimension_type,
+            "isReference": is_reference,
+            "confidence": 0.95,  # High confidence for explicit asymmetric tolerances
             "extractionMode": "AUTOMATIC"
         }
 
@@ -134,10 +389,14 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
             "lowerTolerance": lower_tol,
             "unit": "mm",
             "prefix": prefix,
+            "dimensionType": dimension_type,
+            "isReference": is_reference,
+            "confidence": 0.85,  # Good confidence for single tolerance
             "extractionMode": "AUTOMATIC"
         }
 
     # Pattern 4: Simple nominal number e.g. 25 or 25.00 or 116.18 or 3.67
+    # ENHANCED: Check for compound dimensions (diameter/radius with depth, chamfer, thread, etc.)
     nom_match = re.search(r'^([0-9]+(?:\.[0-9]+)?)', clean_text)
     if nom_match:
         nominal = float(nom_match.group(1))
@@ -150,6 +409,29 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
         if nominal > 9999 or nominal == 0:
             return None
 
+        # ADDED: Boost confidence for compound specifications with contextual keywords
+        confidence = 0.6  # Base confidence for simple number
+        
+        # Check for compound dimension indicators
+        compound_indicators = [
+            'DEEP', 'DP', 'DEPTH',  # Depth specifications
+            'TAP', 'THRU', 'THROUGH',  # Thread/hole specifications  
+            'CHAM', 'CHAMFER',  # Chamfer specifications
+            'MM', 'CM', 'IN',  # Explicit units
+            'X', '×',  # Multiplication/compound (e.g., ⌀50 X 10 DEEP)
+        ]
+        
+        remaining_text = clean_text[nom_match.end():].upper()
+        has_compound = any(indicator in remaining_text for indicator in compound_indicators)
+        
+        # Boost confidence for dimensional specifications with context
+        if has_compound or prefix:  # Has diameter/radius prefix or compound indicators
+            confidence = 0.9  # High confidence - this is clearly a dimension spec
+        elif re.search(r'(mm|m|cm|in|\"|\'|°)', clean_text, re.IGNORECASE):
+            confidence = 0.8  # Medium-high - has unit specification
+        elif dimension_type != "LINEAR":  # Has type prefix but nothing else
+            confidence = 0.75  # Medium - diameter/radius/thread without additional context
+
         return {
             "found": True,
             "rawText": text.strip(),
@@ -158,6 +440,9 @@ def parse_dimension_string(text: str) -> Optional[Dict[str, Any]]:
             "lowerTolerance": 0.0,
             "unit": "mm",
             "prefix": prefix,
+            "dimensionType": dimension_type,
+            "isReference": is_reference,
+            "confidence": confidence,
             "extractionMode": "AUTOMATIC"
         }
 
@@ -229,6 +514,7 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
     """
     Scans entire PDF page and automatically finds all dimension callouts with tolerances.
     Uses Hybrid approach: PyMuPDF vector blocks + EasyOCR fallback for scanned/image drawings.
+    ENHANCED: Includes title block detection, spatial filtering, and confidence scoring.
     """
     try:
         doc = fitz.open(file_path)
@@ -242,6 +528,12 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
 
         detected = []
         seen_coords = set()
+
+        # ADDED: Detect title block region using heuristics
+        title_block_region = detect_title_block_region(page, width, height)
+        
+        # ADDED: Detect drawing view boundaries (section labels, detail circles, etc.)
+        view_regions = detect_view_regions(page, width, height)
 
         # 1. Stage 1: Vector Text Extraction via PyMuPDF (Word-level precision)
         words = page.get_text("words")
@@ -278,11 +570,18 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                 # Skip out-of-bounds text items (e.g. margin annotations) individually
                 if norm_x < 0.0 or norm_y < 0.0 or norm_x > 1.0 or norm_y > 1.0:
                     continue
+                
+                # ADDED: Skip title block region
+                if is_in_title_block(norm_x, norm_y, title_block_region):
+                    continue
 
                 coord_key = (round(norm_x, 3), round(norm_y, 3))
                 if coord_key in seen_coords:
                     continue
                 seen_coords.add(coord_key)
+                
+                # ADDED: Determine which view this dimension belongs to
+                view_id = identify_view_for_point(norm_x, norm_y, view_regions)
 
                 detected.append({
                     "normX": norm_x,
@@ -299,6 +598,10 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                     "lowerTolerance": parsed["lowerTolerance"],
                     "unit": parsed["unit"],
                     "prefix": parsed.get("prefix", ""),
+                    "dimensionType": parsed.get("dimensionType", "LINEAR"),
+                    "isReference": parsed.get("isReference", False),
+                    "confidence": parsed.get("confidence", 0.7),
+                    "viewId": view_id,
                     "extractionMode": "VECTOR_AUTOMATIC"
                 })
 
@@ -346,14 +649,17 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                         norm_x = round(float(cx) / img_w, 4)
                         norm_y = round(float(cy) / img_h, 4)
 
-                        # Skip title block area (bottom-right corner)
-                        if norm_x > 0.60 and norm_y > 0.80:
+                        # ENHANCED: Use detected title block instead of hard-coded position
+                        if is_in_title_block(norm_x, norm_y, title_block_region):
                             continue
 
                         coord_key = (round(norm_x, 2), round(norm_y, 2))
                         if coord_key in seen_coords:
                             continue
                         seen_coords.add(coord_key)
+                        
+                        # Determine view
+                        view_id = identify_view_for_point(norm_x, norm_y, view_regions)
 
                         detected.append({
                             "normX": norm_x,
@@ -370,6 +676,10 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                             "lowerTolerance": parsed["lowerTolerance"],
                             "unit": parsed["unit"],
                             "prefix": parsed.get("prefix", ""),
+                            "dimensionType": parsed.get("dimensionType", "LINEAR"),
+                            "isReference": parsed.get("isReference", False),
+                            "confidence": parsed.get("confidence", 0.7) * prob,  # Combine parsing and OCR confidence
+                            "viewId": view_id,
                             "extractionMode": "OCR_AUTOMATIC"
                         })
 
