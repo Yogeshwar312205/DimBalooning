@@ -78,26 +78,31 @@ model Balloon {
   updatedAt           DateTime          @updatedAt
 
   measurement Measurement?
+  
+  @@unique([inspectionSessionId, balloonNumber])
 }
 
 model Measurement {
-  id             String   @id @default(uuid())
-  balloonId      String   @unique
-  balloon        Balloon  @relation(fields: [balloonId], references: [id], onDelete: Cascade)
-  dimensionText  String?  // e.g., "25 ± 0.10"
-  nominalValue   Float?
-  upperTolerance Float?
-  lowerTolerance Float?
-  lowerLimit     Float?
-  upperLimit     Float?
-  actualValue    Float?
-  unit           String   @default("mm")
-  status         String   @default("PENDING") // PASS, CHECK, FAIL, PENDING
-  remarks        String?
-  updatedById    String?
-  updatedBy      User?    @relation(fields: [updatedById], references: [id])
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                String   @id @default(uuid())
+  balloonId         String   @unique
+  balloon           Balloon  @relation(fields: [balloonId], references: [id], onDelete: Cascade)
+  dimensionText     String?  // e.g., "25 ± 0.10"
+  nominalValue      Float?
+  upperTolerance    Float?
+  lowerTolerance    Float?
+  lowerLimit        Float?
+  upperLimit        Float?
+  actualValue       Float?
+  unit              String   @default("mm")
+  status            String   @default("PENDING") // PASS, CHECK, FAIL, PENDING
+  remarks           String?
+  extractionMode    String?  // VECTOR, OCR, FUSED_VECTOR_OCR, MANUAL
+  toleranceStatus   String?  // EXPLICIT, GENERAL, UNKNOWN, MISSING
+  confidence        Float?   // Extraction confidence score 0.0-1.0
+  updatedById       String?
+  updatedBy         User?    @relation(fields: [updatedById], references: [id])
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 }
 
 model InspectionCollaborator {

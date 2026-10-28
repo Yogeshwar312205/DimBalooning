@@ -169,6 +169,14 @@ export async function createBalloon(req: AuthRequest, res: Response) {
     const upperTol = extracted?.upperTolerance !== undefined ? extracted.upperTolerance : null;
     const lowerTol = extracted?.lowerTolerance !== undefined ? extracted.lowerTolerance : null;
     const initialTolerance = calculateTolerance(nominal, upperTol, lowerTol, null);
+    
+    // Determine tolerance status
+    let toleranceStatus = 'UNKNOWN';
+    if (upperTol !== null && upperTol !== 0 || lowerTol !== null && lowerTol !== 0) {
+      toleranceStatus = 'EXPLICIT';
+    } else if (nominal !== null) {
+      toleranceStatus = 'MISSING';  // Nominal present but no tolerance
+    }
 
     const measurement = await prisma.measurement.create({
       data: {
@@ -181,7 +189,10 @@ export async function createBalloon(req: AuthRequest, res: Response) {
         upperLimit: initialTolerance.upperLimit,
         actualValue: null,
         unit: extracted?.unit || 'mm',
-        status: 'PENDING'
+        status: 'PENDING',
+        extractionMode: extracted?.extractionMode || (manualDimension ? 'MANUAL' : 'AUTOMATIC'),
+        toleranceStatus: toleranceStatus,
+        confidence: extracted?.confidence || null
       }
     });
 
@@ -526,6 +537,14 @@ export async function autoDetectBalloons(req: AuthRequest, res: Response) {
       const upperTol = item.upperTolerance ?? null;
       const lowerTol = item.lowerTolerance ?? null;
       const initialTolerance = calculateTolerance(nominal, upperTol, lowerTol, null);
+      
+      // Determine tolerance status
+      let toleranceStatus = 'UNKNOWN';
+      if (upperTol !== null && upperTol !== 0 || lowerTol !== null && lowerTol !== 0) {
+        toleranceStatus = 'EXPLICIT';
+      } else if (nominal !== null) {
+        toleranceStatus = 'MISSING';
+      }
 
       const measurement = await prisma.measurement.create({
         data: {
@@ -538,7 +557,10 @@ export async function autoDetectBalloons(req: AuthRequest, res: Response) {
           upperLimit: initialTolerance.upperLimit,
           actualValue: null,
           unit: item.unit || 'mm',
-          status: 'PENDING'
+          status: 'PENDING',
+          extractionMode: item.extractionMode || 'AUTOMATIC',
+          toleranceStatus: toleranceStatus,
+          confidence: item.confidence || null
         }
       });
 

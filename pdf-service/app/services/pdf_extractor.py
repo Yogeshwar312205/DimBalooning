@@ -738,6 +738,7 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
 
         detected = []
         seen_coords = set()
+        consumed_tolerance_positions = set()  # NEW: Track tolerance fragments that were merged
 
         # Detect structural regions
         drawing_boundary = detect_drawing_boundary(page, width, height)
@@ -842,6 +843,9 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
             
             # Try merging with tolerance text
             merged_successfully = False
+            consumed_tolerance_text = None  # Track which tolerance was consumed
+            consumed_tolerance_position = None  # Track position of consumed tolerance
+            
             for tol_type, tol_text, dist in nearby_tolerance_candidates:
                 # Try different merge patterns
                 merge_attempts = []
@@ -878,15 +882,35 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                                 clean_line = merged_text
                                 parsed = parsed_merged  # Update parsed with merged version
                                 merged_successfully = True
+                                consumed_tolerance_text = tol_text  # Mark as consumed
                                 break
                             elif nom <= 5 and max_tol < nom:  # Tolerance < nominal for small dims
                                 clean_line = merged_text
                                 parsed = parsed_merged  # Update parsed with merged version
                                 merged_successfully = True
+                                consumed_tolerance_text = tol_text  # Mark as consumed
                                 break
                 
                 if merged_successfully:
                     break
+            
+            # NEW: If we successfully merged a tolerance, find and mark its position as consumed
+            if merged_successfully and consumed_tolerance_text:
+                for w in words:
+                    if w[4].strip() == consumed_tolerance_text:
+                        tol_cx = (w[0] + w[2]) / 2.0
+                        tol_cy = (w[1] + w[3]) / 2.0
+                        tol_norm_x = round(tol_cx / width, 4)
+                        tol_norm_y = round(tol_cy / height, 4)
+                        
+                        # Check if this is the tolerance we merged (within search radius)
+                        dx = abs(tol_cx - cx)
+                        dy = abs(tol_cy - cy)
+                        if (dx < 35 and dy < tolerance_search_radius) or (dy < 10 and 5 < dx < tolerance_search_radius):
+                            # Mark this position as consumed
+                            consumed_coord_key = (tol_norm_x, tol_norm_y)
+                            consumed_tolerance_positions.add(consumed_coord_key)
+                            break
 
             # At this point, parsed contains the dimension (either original or merged)
             if parsed and parsed.get("found"):
@@ -901,6 +925,12 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                 # FILTER 1: Out of bounds check
                 if norm_x < 0.0 or norm_y < 0.0 or norm_x > 1.0 or norm_y > 1.0:
                     filter_stats["out_of_bounds"] += 1
+                    continue
+                
+                # NEW FILTER: Skip if this position was already consumed as a tolerance fragment
+                coord_key = (norm_x, norm_y)
+                if coord_key in consumed_tolerance_positions:
+                    filter_stats["duplicate"] += 1  # Count as duplicate (already part of another dimension)
                     continue
                 
                 # FILTER 2: Sheet border annotations (grid labels, fold marks, etc.)
@@ -970,8 +1000,18 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                     "extractionMode": "VECTOR_AUTOMATIC"
                 })
 
-        # Stage 2: OCR Extraction for Scanned / Raster Image PDF Drawings (Fallback only if 0 vector items)
+        # Stage 2: OCR Extraction for Scanned / Raster Image PDF Drawings
+        # DISABLED: OCR turned off to revert to pure vector-only mode
+        # To re-enable mixed PDF support, change run_ocr to True
+        ocr_detected = []
+        run_ocr = False  # ← DISABLED: Set to True to enable OCR and mixed PDF support
+        
+        # Original behavior: Only run OCR if vector finds nothing
         if len(detected) == 0:
+            run_ocr = True  # Fallback for pure scanned PDFs
+            print(f"No vector dimensions found, enabling OCR fallback for scanned PDF")
+        
+        if run_ocr:
             reader = get_ocr_reader()
             if reader:
                 pix = page.get_pixmap(dpi=150)
@@ -1048,7 +1088,7 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                         # Determine view
                         view_id = identify_view_for_point(norm_x, norm_y, view_regions)
 
-                        detected.append({
+                        ocr_detected.append({
                             "normX": norm_x,
                             "normY": norm_y,
                             "bbox": {
@@ -1070,7 +1110,48 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
                             "extractionMode": "OCR_AUTOMATIC"
                         })
         
-        # Log filtering statistics
+        # Stage 3: Vector-OCR Fusion and Deduplication
+        # CRITICAL NEW STAGE: Merge vector and OCR results, removing duplicates
+        try:
+            from .fusion import (
+                fuse_vector_and_ocr_candidates,
+                deduplicate_within_source
+            )
+        except ImportError:
+            # Fallback for different execution contexts
+            import sys
+            import os
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            sys.path.insert(0, current_dir)
+            from fusion import (
+                fuse_vector_and_ocr_candidates,
+                deduplicate_within_source
+            )
+        
+        # First, deduplicate within each source
+        vector_deduped = deduplicate_within_source(detected, source_name="VECTOR", verbose=False)
+        ocr_deduped = deduplicate_within_source(ocr_detected, source_name="OCR", verbose=False)
+        
+        # Then, fuse vector and OCR results
+        fused_results, fusion_stats = fuse_vector_and_ocr_candidates(
+            vector_candidates=vector_deduped,
+            ocr_candidates=ocr_deduped,
+            iou_threshold=0.5,
+            distance_threshold=0.02,
+            text_sim_threshold=0.6,
+            verbose=True  # Enable fusion diagnostics
+        )
+        
+        # Replace detected with fused results
+        detected = fused_results
+        
+        # Update filter stats with fusion information
+        filter_stats["vector_candidates"] = len(vector_deduped)
+        filter_stats["ocr_candidates"] = len(ocr_deduped)
+        filter_stats["fusion_matched_pairs"] = fusion_stats.get("matched_pairs", 0)
+        filter_stats["fusion_output"] = len(detected)
+        
+        # Log filtering and fusion statistics
         total_filtered = (filter_stats["sheet_border"] + filter_stats["outside_drawing"] + 
                          filter_stats["title_block"] + filter_stats["revision_table"] + 
                          filter_stats["duplicate"] + filter_stats["out_of_bounds"])
@@ -1086,6 +1167,14 @@ def extract_all_dimensions_from_page(file_path: str, page_number: int = 1) -> Di
             print(f"    - Revision table: {filter_stats['revision_table']}")
             print(f"    - Duplicates: {filter_stats['duplicate']}")
             print(f"    - Out of bounds: {filter_stats['out_of_bounds']}")
+        
+        # Print fusion statistics if OCR was run
+        if filter_stats.get("vector_candidates") is not None:
+            print(f"\n  Fusion Statistics:")
+            print(f"    - Vector candidates: {filter_stats.get('vector_candidates', 0)}")
+            print(f"    - OCR candidates: {filter_stats.get('ocr_candidates', 0)}")
+            print(f"    - Matched pairs (merged): {filter_stats.get('fusion_matched_pairs', 0)}")
+            print(f"    - Final unique dimensions: {filter_stats.get('fusion_output', 0)}")
 
         return {
             "success": True,
